@@ -1,0 +1,55 @@
+version: 1
+
+scope:
+  authorized: true
+  base_url: http://127.0.0.1:8000
+  allowed_hosts:
+    - 127.0.0.1
+  timeout_seconds: 3
+  max_requests: 12
+  max_response_bytes: 65536
+  allow_destructive: false
+
+identities:
+  alice:
+    role: user
+    auth:
+      type: bearer
+      token_env: AUTHMATRIX_ALICE_TOKEN
+  bob:
+    role: user
+    auth:
+      type: bearer
+      token_env: AUTHMATRIX_BOB_TOKEN
+  admin:
+    role: admin
+    auth:
+      type: bearer
+      token_env: AUTHMATRIX_ADMIN_TOKEN
+
+resources:
+  - name: items
+    ids: ["1", "2"]
+    owner_by_id:
+      "1": alice
+      "2": bob
+
+operations:
+  - id: read_item
+    category: BOLA
+    method: GET
+    path: /items/{item_id}
+    resource: items
+    expected:
+      alice: { "1": allow, "2": deny }
+      bob: { "1": deny, "2": allow }
+      admin: { "1": allow, "2": allow }
+
+  - id: read_admin_reports
+    category: BFLA
+    method: GET
+    path: /admin/reports
+    expected:
+      alice: deny
+      bob: deny
+      admin: allow

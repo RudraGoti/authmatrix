@@ -1,0 +1,25 @@
+openapi: 3.0.3
+info:
+  title: AuthMatrix Local Demo API
+  version: 1.0.0
+paths:
+  /items/{item_id}:
+    get:
+      operationId: readItem
+      summary: Read an item
+      parameters:
+        - in: path
+          name: item_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Item
+  /admin/reports:
+    get:
+      operationId: readAdminReports
+      summary: Read administrator reports
+      responses:
+        "200":
+          description: Reports
