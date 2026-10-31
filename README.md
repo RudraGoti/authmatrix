@@ -99,9 +99,18 @@ included demo server is read-only. The policy parser rejects destructive methods
 unless `scope.allow_destructive: true` is deliberately set; keep it disabled
 unless testing a disposable, explicitly authorized local service.
 
-The OpenAPI importer parses local OpenAPI 3.x JSON/YAML and extracts operations;
-it does not fetch remote references, select a scan target, or infer access
-control rules. The policy is the source of expected decisions. See
+The OpenAPI importer parses local OpenAPI 3.x JSON/YAML and extracts supported
+HTTP operations with their path, query, and header parameters. It merges
+path-level parameters with operation-level parameters, allowing operation-level
+definitions to override matching path-level definitions. Required path parameters
+must match the route placeholders. Invalid definitions, unsupported parameter
+locations, styles, content-based parameters, and unresolved parameter references
+are rejected.
+
+The importer does not fetch remote references, select a scan target, generate
+parameter values, or infer access-control rules. Imported parameters are inventory
+metadata only; they do not automatically become scan inputs. The policy remains
+the source of expected access decisions. See
 [architecture and safety boundaries](docs/architecture.md).
 
 ## Scan baseline comparison
