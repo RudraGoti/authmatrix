@@ -10,7 +10,11 @@ import pytest
 
 from authmatrix.config import AuthConfig, Identity, load_config
 from authmatrix.errors import ScanError, ScopeError
-from authmatrix.scanner import _auth_for, run_authorization_tests
+from authmatrix.scanner import (
+    _auth_for,
+    _parse_returned_object_id,
+    run_authorization_tests,
+)
 
 
 def _config(config_path: Path, port: int, tmp_path: Path):
@@ -452,3 +456,63 @@ def test_verified_unauthorized_object_access_creates_finding(
     assert finding["evidence"]["object_id_verified"] is True
     assert finding["evidence"]["requested_resource_id"] == "1"
     assert finding["evidence"]["returned_resource_id"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("body", "path", "expected"),
+    [
+        (b'{"id":"42"}', "id", "42"),
+        (b'{"data":{"order":{"id":"42"}}}', "data.order.id", "42"),
+        (
+            b'{"data":{"orders":[{"id":"10"},{"id":"20"}]}}',
+            "data.orders[0].id",
+            "10",
+        ),
+        (
+            b'{"data":{"orders":[{"id":"10"},{"id":"20"}]}}',
+            "data.orders[1].id",
+            "20",
+        ),
+        (
+            b'{"data":{"orders":[{"items":[{"id":"99"}]}]}}',
+            "data.orders[0].items[0].id",
+            "99",
+        ),
+        (b'{"id":42}', "id", "42"),
+    ],
+)
+def test_parse_returned_object_id_valid_paths(
+    body: bytes,
+    path: str,
+    expected: str,
+) -> None:
+    assert _parse_returned_object_id(body, path) == expected
+
+
+@pytest.mark.parametrize(
+    ("body", "path"),
+    [
+        (b'{"data":{"orders":[]}}', "data.orders[0].id"),
+        (
+            b'{"data":{"orders":[{"id":"10"}]}}',
+            "data.orders[1].id",
+        ),
+        (b'{"data":{"orders":[{"id":"10"}]}}', "data.orders[-1].id"),
+        (b'{"data":{"orders":[{"id":"10"}]}}', "data.orders[].id"),
+        (b'{"data":{"orders":[{"id":"10"}]}}', "data.orders[0]id"),
+        (b'{"data":{"orders":[{"id":"10"}]}}', "data..orders[0].id"),
+        (b'{"data":{"orders":[{"id":"10"}]}}', "data.orders[0]."),
+        (b'{"id":true}', "id"),
+        (b'{"id":null}', "id"),
+        (b'{"id":{"value":"42"}}', "id"),
+        (b'{"id":["42"]}', "id"),
+        (b'{"id":42.5}', "id"),
+        (b'not-valid-json', "id"),
+        (b'{"id":"42"}', ""),
+    ],
+)
+def test_parse_returned_object_id_invalid_or_missing_values(
+    body: bytes,
+    path: str,
+) -> None:
+    assert _parse_returned_object_id(body, path) is None
