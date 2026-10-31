@@ -104,6 +104,23 @@ it does not fetch remote references, select a scan target, or infer access
 control rules. The policy is the source of expected decisions. See
 [architecture and safety boundaries](docs/architecture.md).
 
+## Scan baseline comparison
+
+Compare a new scan with a previously saved scan report:
+
+```bash
+authmatrix compare --baseline baseline.json --current current.json --output comparison.json
+```
+
+Findings are classified as:
+- **New:** present only in the current scan.
+- **Fixed:** present only in the baseline.
+- **Recurring:** present in both scans.
+
+Matching uses stable fingerprints based on category, operation, HTTP method, path, identity, and resource ID. Changes to title or severity alone do not create a new finding.
+
+Both reports must be valid AuthMatrix scan reports for the same target. Missing, malformed, or incompatible reports are rejected. The comparison output is JSON with summary counts and finding details.
+
 ## Reports and sensitive data
 
 Reports include policy checks, status codes, finding severity, identity labels,
