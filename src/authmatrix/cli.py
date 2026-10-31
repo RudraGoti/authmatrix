@@ -82,7 +82,9 @@ def test_authorization(
     typer.echo(
         f"Completed {results['summary']['requests']} requests: "
         f"{results['summary']['findings']} finding(s), "
-        f"{results['summary']['failed']} failed check(s). Results: {output}"
+        f"{results['summary']['failed']} failed check(s), "
+        f"{results['summary'].get('inconclusive', 0)} inconclusive check(s). "
+        f"Results: {output}"
     )
 
 

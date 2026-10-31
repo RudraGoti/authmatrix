@@ -34,10 +34,11 @@ def test_vulnerable_lab_detects_authorization_failures(
     result = run_authorization_tests(config)
 
     assert result["summary"] == {
-        "requests": 9,
-        "passed": 5,
-        "failed": 4,
-        "findings": 4,
+    "requests": 9,
+    "passed": 5,
+    "failed": 4,
+    "inconclusive": 0,
+    "findings": 4,
     }
 
     assert {finding["category"] for finding in result["findings"]} == {
@@ -227,3 +228,163 @@ def test_policy_owner_mapping_identifies_cross_user_access(
 
     # Bob accessing Alice's resource is a cross-user access attempt.
     assert owners["1"] != "bob"
+
+
+
+@pytest.mark.parametrize(
+    ("response_body", "expected_actual", "expected_inconclusive"),
+    [
+        (b'{"id":"1","value":"sample"}', "allow", False),
+        (b'{"value":"sample"}', "unknown", True),
+        (b'{"id":"2","value":"sample"}', "unknown", True),
+        (b'not-valid-json', "unknown", True),
+        (b'[]', "unknown", True),
+    ],
+)
+def test_bola_response_object_id_verification(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+    monkeypatch,
+    response_body: bytes,
+    expected_actual: str,
+    expected_inconclusive: bool,
+) -> None:
+    import authmatrix.scanner as scanner
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def iter_bytes(self):
+            yield response_body
+
+    class MockClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr(scanner.httpx, "Client", MockClient)
+
+    config = _config(config_path, demo_server, tmp_path)
+
+    # Keep one BOLA operation and one identity/resource combination.
+    operation = next(op for op in config.operations if op.category == "BOLA")
+    identity_name = next(iter(config.identities))
+    config = replace(
+        config,
+        identities={identity_name: config.identities[identity_name]},
+        resources={
+            operation.resource: replace(
+                config.resources[operation.resource],
+                ids=("1",),
+            )
+        },
+        operations=(operation,),
+    )
+
+    result = run_authorization_tests(config)
+
+    check = result["checks"][0]
+
+    assert check["actual"] == expected_actual
+    assert check["inconclusive"] is expected_inconclusive
+    assert check["passed"] is (not expected_inconclusive)
+    assert result["summary"]["inconclusive"] == int(expected_inconclusive)
+
+    if expected_inconclusive:
+        assert result["summary"]["failed"] == 0
+        assert result["findings"] == []
+    else:
+        assert result["summary"]["passed"] == 1
+
+
+
+def test_verified_unauthorized_object_access_creates_finding(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import authmatrix.scanner as scanner
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def iter_bytes(self):
+            yield b'{"id":"1","value":"sample"}'
+
+    class MockClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr(scanner.httpx, "Client", MockClient)
+
+    config = _config(config_path, demo_server, tmp_path)
+
+    operation = next(op for op in config.operations if op.category == "BOLA")
+    identity_name = "bob"
+
+    operation = replace(
+        operation,
+        expected={identity_name: {"1": "deny"}},
+    )
+
+    config = replace(
+        config,
+        identities={identity_name: config.identities[identity_name]},
+        resources={
+            operation.resource: replace(
+                config.resources[operation.resource],
+                ids=("1",),
+            )
+        },
+        operations=(operation,),
+    )
+
+    result = run_authorization_tests(config)
+
+    assert result["summary"]["requests"] == 1
+    assert result["summary"]["failed"] == 1
+    assert result["summary"]["inconclusive"] == 0
+    assert result["summary"]["findings"] == 1
+
+    finding = result["findings"][0]
+
+    assert finding["category"] == "BOLA"
+    assert finding["severity"] == "high"
+    assert finding["evidence"]["object_id_verified"] is True
+    assert finding["evidence"]["requested_resource_id"] == "1"
+    assert finding["evidence"]["returned_resource_id"] == "1"

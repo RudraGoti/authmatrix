@@ -50,6 +50,7 @@ def _auth_for(identity: Identity) -> tuple[dict[str, str], httpx.BasicAuth | Non
                 f"{identity.name}."
             )
         return {"Authorization": f"Bearer {token}"}, None
+
     username = os.environ.get(identity.auth.username_env or "")
     password = os.environ.get(identity.auth.password_env or "")
     if not username or not password:
@@ -62,20 +63,24 @@ def _auth_for(identity: Identity) -> tuple[dict[str, str], httpx.BasicAuth | Non
 def _route(operation: Operation, resource_id: str | None) -> str:
     if resource_id is None:
         return operation.path
+
     parts = operation.path.split("/")
     replaced = []
     count = 0
+
     for part in parts:
         if part.startswith("{") and part.endswith("}"):
             replaced.append(quote(resource_id, safe=""))
             count += 1
         else:
             replaced.append(part)
+
     if count != 1:
         raise ScanError(
             f"Operation {operation.operation_id} must have exactly one "
             "resource placeholder."
         )
+
     return "/".join(replaced)
 
 
@@ -87,17 +92,54 @@ def _expected(operation: Operation, identity_name: str, resource_id: str | None)
 def _request_url(config: ScanConfig, route: str) -> str:
     url = f"{config.base_url}{route}"
     parsed = urlsplit(url)
+
     validate_scope(
         f"{parsed.scheme}://{parsed.netloc}",
         config.allowed_hosts,
     )
+
     return url
 
 
+def _parse_returned_object_id(body: bytes) -> str | None:
+    """Return a scalar JSON object ID, or None if it cannot be verified."""
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    returned_id = payload.get("id")
+
+    if isinstance(returned_id, bool) or not isinstance(returned_id, (str, int)):
+        return None
+
+    return str(returned_id)
+
+
+def _read_response_body(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read a bounded response body without retaining oversized responses."""
+    body = bytearray()
+
+    for chunk in response.iter_bytes():
+        if len(body) + len(chunk) > max_bytes:
+            raise ScanError(
+                "Response exceeded scope.max_response_bytes "
+                f"({max_bytes})."
+            )
+        body.extend(chunk)
+
+    return bytes(body)
+
+
 def run_authorization_tests(config: ScanConfig) -> dict:
-    """Run checks without following redirects or retaining response bodies."""
+    """Run bounded authorization checks against explicitly scoped targets."""
     validate_scope(config.base_url, config.allowed_hosts)
+
     total = _request_count(config)
+
     if total > config.max_requests:
         raise ScanError(
             f"Scan requires {total} requests, exceeding scope.max_requests "
@@ -108,6 +150,7 @@ def run_authorization_tests(config: ScanConfig) -> dict:
     checks = []
     findings = []
     request_number = 0
+
     with httpx.Client(
         timeout=config.timeout_seconds,
         follow_redirects=False,
@@ -119,17 +162,22 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                 if operation.resource is not None
                 else (None,)
             )
+
             for identity_name, identity in config.identities.items():
                 headers, basic_auth = _auth_for(identity)
+
                 for resource_id in resource_ids:
                     request_number += 1
+
                     if request_number > config.max_requests:
                         raise ScanError(
                             "Request limit exceeded before sending the request."
                         )
+
                     expected = _expected(operation, identity_name, resource_id)
                     route = _route(operation, resource_id)
                     url = _request_url(config, route)
+
                     if (
                         operation.method in DESTRUCTIVE_METHODS
                         and not config.allow_destructive
@@ -138,6 +186,7 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                             f"Destructive operation {operation.operation_id} "
                             "is disabled."
                         )
+
                     try:
                         with client.stream(
                             operation.method,
@@ -150,18 +199,14 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                                     f"Unsafe redirect from {operation.method} {route}; "
                                     "redirects are never followed."
                                 )
-                            size = 0
-                            for chunk in response.iter_bytes():
-                                size += len(chunk)
-                                if size > config.max_response_bytes:
-                                    raise ScanError(
-                                        f"Response for {operation.operation_id} "
-                                        "exceeded "
-                                        "scope.max_response_bytes "
-                                        f"({config.max_response_bytes})."
-                                    )
+
                             status_code = response.status_code
                             content_type = response.headers.get("content-type", "")
+                            body = _read_response_body(
+                                response,
+                                config.max_response_bytes,
+                            )
+
                     except (ScopeError, ScanError):
                         raise
                     except httpx.RequestError as exc:
@@ -170,7 +215,23 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                             f"as identity {identity_name} ({type(exc).__name__})."
                         ) from exc
 
-                    actual = "allow" if 200 <= status_code < 300 else "deny"
+                    is_success = 200 <= status_code < 300
+                    inconclusive = False
+                    returned_id = None
+
+                    if operation.category == "BOLA" and is_success:
+                        returned_id = _parse_returned_object_id(body)
+
+                        if returned_id != resource_id:
+                            actual = "unknown"
+                            inconclusive = True
+                        else:
+                            actual = "allow"
+                    else:
+                        actual = "allow" if is_success else "deny"
+
+                    passed = not inconclusive and expected == actual
+
                     check = {
                         "operation_id": operation.operation_id,
                         "category": operation.category,
@@ -183,10 +244,28 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                         "actual": actual,
                         "status_code": status_code,
                         "content_type": content_type,
-                        "passed": expected == actual,
+                        "passed": passed,
+                        "inconclusive": inconclusive,
                     }
+
                     checks.append(check)
+
                     if expected == "deny" and actual == "allow":
+                        evidence = {
+                            "identity": identity_name,
+                            "role": identity.role,
+                            "resource_id": resource_id,
+                            "expected_decision": "deny",
+                            "observed_decision": "allow",
+                            "http_status": status_code,
+                            "response_content_type": content_type,
+                        }
+
+                        if operation.category == "BOLA":
+                            evidence["requested_resource_id"] = resource_id
+                            evidence["returned_resource_id"] = returned_id
+                            evidence["object_id_verified"] = True
+
                         findings.append(
                             {
                                 "id": (
@@ -201,15 +280,7 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                                     else "Unauthorized function access"
                                 ),
                                 "operation_id": operation.operation_id,
-                                "evidence": {
-                                    "identity": identity_name,
-                                    "role": identity.role,
-                                    "resource_id": resource_id,
-                                    "expected_decision": "deny",
-                                    "observed_decision": "allow",
-                                    "http_status": status_code,
-                                    "response_content_type": content_type,
-                                },
+                                "evidence": evidence,
                                 "reproduction": {
                                     "method": operation.method,
                                     "path": route,
@@ -231,7 +302,12 @@ def run_authorization_tests(config: ScanConfig) -> dict:
         "summary": {
             "requests": len(checks),
             "passed": sum(1 for check in checks if check["passed"]),
-            "failed": sum(1 for check in checks if not check["passed"]),
+            "failed": sum(
+                1
+                for check in checks
+                if not check["passed"] and not check["inconclusive"]
+            ),
+            "inconclusive": sum(1 for check in checks if check["inconclusive"]),
             "findings": len(findings),
         },
         "findings": findings,

@@ -14,7 +14,13 @@ def sample_results() -> dict:
         "schema_version": 1,
         "generated_at": "2026-01-01T00:00:00+00:00",
         "target": "http://127.0.0.1:8000",
-        "summary": {"requests": 1, "passed": 0, "failed": 1, "findings": 1},
+        "summary": {
+            "requests": 1,
+            "passed": 0,
+            "failed": 1,
+            "inconclusive": 2,
+            "findings": 1,
+        },
         "findings": [
             {
                 "id": "test",
@@ -57,3 +63,16 @@ def test_rejects_invalid_report_json(tmp_path: Path) -> None:
     source.write_text("{", encoding="utf-8")
     with pytest.raises(ScanError, match="not valid JSON"):
         load_results(source)
+
+def test_html_report_displays_inconclusive_count() -> None:
+    report = render_html(sample_results())
+    assert "Inconclusive: 2" in report
+
+
+def test_html_report_supports_older_summary_without_inconclusive() -> None:
+    results = sample_results()
+    results["summary"].pop("inconclusive")
+
+    report = render_html(results)
+
+    assert "Inconclusive: 0" in report

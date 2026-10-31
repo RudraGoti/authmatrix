@@ -65,7 +65,9 @@ def render_html(results: dict) -> str:
         f"<strong>Generated:</strong> {html.escape(results['generated_at'])}</p>"
         "<header><h2>Summary</h2>"
         f"<p>Requests: {summary['requests']} · Passed: {summary['passed']} · "
-        f"Failed: {summary['failed']} · Findings: {summary['findings']}</p></header>"
+        f"Failed: {summary['failed']} · "
+        f"Inconclusive: {summary.get('inconclusive', 0)} · "
+        f"Findings: {summary['findings']}</p></header>"
         "<h2>Findings</h2>" + "".join(finding_rows) + "</body></html>\n"
     )
 
