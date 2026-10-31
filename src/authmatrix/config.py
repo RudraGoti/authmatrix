@@ -17,7 +17,9 @@ from authmatrix.errors import ConfigurationError, ScopeError
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ALL_METHODS = SAFE_METHODS | DESTRUCTIVE_METHODS
-RESPONSE_ID_SEGMENT = re.compile(r"^[A-Za-z0-9_]+$")
+RESPONSE_ID_PATH = re.compile(
+    r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+|\[[0-9]+\])*$"
+)
 
 
 @dataclass(frozen=True)
@@ -394,11 +396,7 @@ def load_config(path: str | Path, *, check_auth_env: bool = False) -> ScanConfig
         else:
             if (
                 not isinstance(response_id_path, str)
-                or not response_id_path
-                or any(
-                    not RESPONSE_ID_SEGMENT.fullmatch(segment)
-                    for segment in response_id_path.split(".")
-                )
+                or not RESPONSE_ID_PATH.fullmatch(response_id_path)
             ):
                 raise ConfigurationError(
                     f"Operation {operation_id} has an invalid response_id_path."

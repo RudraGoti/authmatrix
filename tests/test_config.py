@@ -115,7 +115,16 @@ def test_accepts_nested_bola_response_id_path(
 
 @pytest.mark.parametrize(
     "invalid_path",
-    ["", ".id", "data.", "data..id", "data.order.id[0]"],
+    [
+        "",
+        ".id",
+        "data.",
+        "data..id",
+        "data.orders[-1].id",
+        "data.orders[].id",
+        "data.orders[abc].id",
+        "data.orders[0]id",
+    ],
 )
 def test_rejects_invalid_bola_response_id_path(
     config_path: Path, tmp_path: Path, invalid_path: str
@@ -130,6 +139,33 @@ def test_rejects_invalid_bola_response_id_path(
 
     with pytest.raises(ConfigurationError, match="response_id_path"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    "valid_path",
+    [
+        "id",
+        "data.order.id",
+        "data.orders[0].id",
+        "data.orders[12].id",
+        "data.orders[0].items[2].id",
+    ],
+)
+def test_accepts_array_index_bola_response_id_paths(
+    config_path: Path, tmp_path: Path, valid_path: str
+) -> None:
+    import yaml
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["operations"][0]["response_id_path"] = valid_path
+
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    config = load_config(path)
+    operation = next(op for op in config.operations if op.category == "BOLA")
+
+    assert operation.response_id_path == valid_path
 
 
 def test_rejects_response_id_path_on_bfla_operation(

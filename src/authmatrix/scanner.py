@@ -111,19 +111,79 @@ def _parse_returned_object_id(
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 
-    current = payload
+    if not isinstance(response_id_path, str) or not response_id_path:
+        return None
 
-    for segment in response_id_path.split("."):
-        if not isinstance(current, dict) or segment not in current:
+    tokens = []
+    position = 0
+    length = len(response_id_path)
+
+    def read_key():
+        nonlocal position
+        start = position
+
+        while position < length:
+            char = response_id_path[position]
+            if not (char.isalnum() or char == "_"):
+                break
+            position += 1
+
+        if position == start:
             return None
 
-        current = current[segment]
+        return response_id_path[start:position]
+
+    first_key = read_key()
+    if first_key is None:
+        return None
+    tokens.append(("key", first_key))
+
+    while position < length:
+        char = response_id_path[position]
+
+        if char == ".":
+            position += 1
+            key = read_key()
+            if key is None:
+                return None
+            tokens.append(("key", key))
+
+        elif char == "[":
+            position += 1
+            start = position
+
+            while position < length and response_id_path[position].isdigit():
+                position += 1
+
+            if position == start or position >= length:
+                return None
+
+            if response_id_path[position] != "]":
+                return None
+
+            index = int(response_id_path[start:position])
+            position += 1
+            tokens.append(("index", index))
+
+        else:
+            return None
+
+    current = payload
+
+    for token_type, value in tokens:
+        if token_type == "key":
+            if not isinstance(current, dict) or value not in current:
+                return None
+            current = current[value]
+        else:
+            if not isinstance(current, list) or value >= len(current):
+                return None
+            current = current[value]
 
     if isinstance(current, bool) or not isinstance(current, (str, int)):
         return None
 
     return str(current)
-
 
 def _read_response_body(response: httpx.Response, max_bytes: int) -> bytes:
     """Read a bounded response body without retaining oversized responses."""
