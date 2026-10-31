@@ -124,6 +124,10 @@ def test_accepts_nested_bola_response_id_path(
         "data.orders[].id",
         "data.orders[abc].id",
         "data.orders[0]id",
+        "data.orders[*",
+        "data.orders[**].id",
+        "data.orders[*]id",
+        "data.orders[*].",
     ],
 )
 def test_rejects_invalid_bola_response_id_path(
@@ -149,6 +153,8 @@ def test_rejects_invalid_bola_response_id_path(
         "data.orders[0].id",
         "data.orders[12].id",
         "data.orders[0].items[2].id",
+        "data.orders[*].id",
+        "data.data.orders[*].items[*].id",
     ],
 )
 def test_accepts_array_index_bola_response_id_paths(

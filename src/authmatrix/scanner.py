@@ -101,11 +101,19 @@ def _request_url(config: ScanConfig, route: str) -> str:
     return url
 
 
-def _parse_returned_object_id(
+def _parse_returned_object_ids(
     body: bytes,
     response_id_path: str = "id",
-) -> str | None:
-    """Return a scalar JSON object ID at the configured path, or None."""
+    max_ids: int = 100,
+) -> tuple[str, ...] | None:
+    """Extract bounded, unique scalar IDs from a JSON response.
+
+    Return None when the path is invalid, missing, unusable, or exceeds
+    the extraction limit. Invalid individual values are skipped.
+    """
+    if not isinstance(max_ids, int) or isinstance(max_ids, bool) or max_ids < 1:
+        return None
+
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -150,14 +158,21 @@ def _parse_returned_object_id(
 
         elif char == "[":
             position += 1
-            start = position
 
+            if response_id_path[position:position + 1] == "*":
+                position += 1
+                if position >= length or response_id_path[position] != "]":
+                    return None
+                position += 1
+                tokens.append(("wildcard", None))
+                continue
+
+            start = position
             while position < length and response_id_path[position].isdigit():
                 position += 1
 
             if position == start or position >= length:
                 return None
-
             if response_id_path[position] != "]":
                 return None
 
@@ -168,22 +183,61 @@ def _parse_returned_object_id(
         else:
             return None
 
-    current = payload
+    current_values = [payload]
 
     for token_type, value in tokens:
-        if token_type == "key":
-            if not isinstance(current, dict) or value not in current:
-                return None
-            current = current[value]
-        else:
-            if not isinstance(current, list) or value >= len(current):
-                return None
-            current = current[value]
+        next_values = []
 
-    if isinstance(current, bool) or not isinstance(current, (str, int)):
-        return None
+        for current in current_values:
+            if token_type == "key":
+                if isinstance(current, dict) and value in current:
+                    next_values.append(current[value])
 
-    return str(current)
+            elif token_type == "index":
+                if isinstance(current, list) and value < len(current):
+                    next_values.append(current[value])
+
+            elif token_type == "wildcard":
+                if isinstance(current, list):
+                    next_values.extend(current)
+
+            if len(next_values) > max_ids:
+                return None
+
+        current_values = next_values
+
+        if not current_values:
+            return None
+
+    extracted = []
+    seen = set()
+
+    for value in current_values:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            continue
+
+        resource_id = str(value)
+
+        if not resource_id or not resource_id.strip() or resource_id in seen:
+            continue
+
+        seen.add(resource_id)
+        extracted.append(resource_id)
+
+        if len(extracted) > max_ids:
+            return None
+
+    return tuple(extracted) if extracted else None
+
+
+def _parse_returned_object_id(
+    body: bytes,
+    response_id_path: str = "id",
+) -> str | None:
+    """Return the first scalar JSON object ID for backward compatibility."""
+    returned_ids = _parse_returned_object_ids(body, response_id_path)
+    return returned_ids[0] if returned_ids else None
+
 
 def _read_response_body(response: httpx.Response, max_bytes: int) -> bytes:
     """Read a bounded response body without retaining oversized responses."""
@@ -283,15 +337,22 @@ def run_authorization_tests(config: ScanConfig) -> dict:
 
                     is_success = 200 <= status_code < 300
                     inconclusive = False
+                    returned_ids = None
                     returned_id = None
 
                     if operation.category == "BOLA" and is_success:
-                        returned_id = _parse_returned_object_id(
+                        returned_ids = _parse_returned_object_ids(
                             body,
                             operation.response_id_path,
                         )
 
-                        if returned_id != resource_id:
+                        returned_id = (
+                            returned_ids[0]
+                            if returned_ids and len(returned_ids) == 1
+                            else None
+                        )
+
+                        if returned_ids is None or resource_id not in returned_ids:
                             actual = "unknown"
                             inconclusive = True
                         else:
@@ -309,6 +370,9 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                         "identity": identity_name,
                         "role": identity.role,
                         "resource_id": resource_id,
+                        "returned_resource_ids": (
+                            list(returned_ids) if returned_ids is not None else None
+                        ),
                         "expected": expected,
                         "actual": actual,
                         "status_code": status_code,
@@ -332,7 +396,9 @@ def run_authorization_tests(config: ScanConfig) -> dict:
 
                         if operation.category == "BOLA":
                             evidence["requested_resource_id"] = resource_id
-                            evidence["returned_resource_id"] = returned_id
+                            evidence["returned_resource_ids"] = list(returned_ids)
+                            if returned_id is not None:
+                                evidence["returned_resource_id"] = returned_id
                             evidence["object_id_verified"] = True
 
                         findings.append(
