@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from authmatrix import __version__
+from authmatrix.comparison import compare_results, write_comparison
 from authmatrix.config import load_config
 from authmatrix.errors import AuthMatrixError
 from authmatrix.lab import run_server
@@ -100,6 +101,28 @@ def report(
     except AuthMatrixError as exc:
         _handle_error(exc)
     typer.echo(f"Wrote {format.upper()} report to {output}.")
+
+
+@app.command("compare")
+def compare(
+    baseline: Path = typer.Option(..., "--baseline", exists=True, readable=True),
+    current: Path = typer.Option(..., "--current", exists=True, readable=True),
+    output: Path = typer.Option(Path("comparison.json"), "--output", "-o"),
+) -> None:
+    """Compare current scan findings against a saved baseline."""
+    try:
+        results = compare_results(str(baseline), str(current))
+        write_comparison(results, output)
+    except AuthMatrixError as exc:
+        _handle_error(exc)
+
+    summary = results["summary"]
+    typer.echo(
+        f"Comparison complete: {summary['new']} new, "
+        f"{summary['fixed']} fixed, "
+        f"{summary['recurring']} recurring. "
+        f"Results: {output}"
+    )
 
 
 @app.command("lab")
