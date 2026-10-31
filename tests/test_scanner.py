@@ -314,6 +314,70 @@ def test_bola_response_object_id_verification(
         assert result["summary"]["passed"] == 1
 
 
+def test_bola_uses_configured_nested_response_id_path(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import authmatrix.scanner as scanner
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def iter_bytes(self):
+            yield b'{"data":{"order":{"id":"1"}}}'
+
+    class MockClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr(scanner.httpx, "Client", MockClient)
+
+    config = _config(config_path, demo_server, tmp_path)
+    operation = next(op for op in config.operations if op.category == "BOLA")
+
+    operation = replace(operation, response_id_path="data.order.id")
+
+    identity_name = next(iter(config.identities))
+
+    config = replace(
+        config,
+        identities={identity_name: config.identities[identity_name]},
+        resources={
+            operation.resource: replace(
+                config.resources[operation.resource],
+                ids=("1",),
+            )
+        },
+        operations=(operation,),
+    )
+
+    result = run_authorization_tests(config)
+
+    check = result["checks"][0]
+
+    assert check["actual"] == "allow"
+    assert check["inconclusive"] is False
+    assert check["passed"] is True
+    assert result["summary"]["inconclusive"] == 0
 
 def test_verified_unauthorized_object_access_creates_finding(
     config_path: Path,

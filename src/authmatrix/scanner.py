@@ -101,22 +101,28 @@ def _request_url(config: ScanConfig, route: str) -> str:
     return url
 
 
-def _parse_returned_object_id(body: bytes) -> str | None:
-    """Return a scalar JSON object ID, or None if it cannot be verified."""
+def _parse_returned_object_id(
+    body: bytes,
+    response_id_path: str = "id",
+) -> str | None:
+    """Return a scalar JSON object ID at the configured path, or None."""
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 
-    if not isinstance(payload, dict):
+    current = payload
+
+    for segment in response_id_path.split("."):
+        if not isinstance(current, dict) or segment not in current:
+            return None
+
+        current = current[segment]
+
+    if isinstance(current, bool) or not isinstance(current, (str, int)):
         return None
 
-    returned_id = payload.get("id")
-
-    if isinstance(returned_id, bool) or not isinstance(returned_id, (str, int)):
-        return None
-
-    return str(returned_id)
+    return str(current)
 
 
 def _read_response_body(response: httpx.Response, max_bytes: int) -> bytes:
@@ -220,7 +226,10 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                     returned_id = None
 
                     if operation.category == "BOLA" and is_success:
-                        returned_id = _parse_returned_object_id(body)
+                        returned_id = _parse_returned_object_id(
+                            body,
+                            operation.response_id_path,
+                        )
 
                         if returned_id != resource_id:
                             actual = "unknown"

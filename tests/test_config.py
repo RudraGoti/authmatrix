@@ -84,3 +84,64 @@ def test_rejects_empty_bola_path_placeholder(
 
     with pytest.raises(ConfigurationError, match="placeholder"):
         load_config(path)
+
+
+def test_bola_response_id_path_defaults_to_top_level_id(
+    config_path: Path,
+) -> None:
+    config = load_config(config_path)
+
+    operation = next(op for op in config.operations if op.category == "BOLA")
+
+    assert operation.response_id_path == "id"
+
+
+def test_accepts_nested_bola_response_id_path(
+    config_path: Path, tmp_path: Path
+) -> None:
+    import yaml
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["operations"][0]["response_id_path"] = "data.order.id"
+
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    config = load_config(path)
+    operation = next(op for op in config.operations if op.category == "BOLA")
+
+    assert operation.response_id_path == "data.order.id"
+
+
+@pytest.mark.parametrize(
+    "invalid_path",
+    ["", ".id", "data.", "data..id", "data.order.id[0]"],
+)
+def test_rejects_invalid_bola_response_id_path(
+    config_path: Path, tmp_path: Path, invalid_path: str
+) -> None:
+    import yaml
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["operations"][0]["response_id_path"] = invalid_path
+
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="response_id_path"):
+        load_config(path)
+
+
+def test_rejects_response_id_path_on_bfla_operation(
+    config_path: Path, tmp_path: Path
+) -> None:
+    import yaml
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["operations"][1]["response_id_path"] = "data.id"
+
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="response_id_path"):
+        load_config(path)
