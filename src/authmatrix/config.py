@@ -18,7 +18,7 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ALL_METHODS = SAFE_METHODS | DESTRUCTIVE_METHODS
 RESPONSE_ID_PATH = re.compile(
-    r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+|\[[0-9]+\])*$"
+    r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+|\[[0-9]+\]|\[\*\])*$"
 )
 
 

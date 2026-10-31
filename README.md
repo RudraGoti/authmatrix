@@ -84,6 +84,16 @@ ruff check .
 - resource IDs and ownership metadata;
 - expected allow/deny decisions for every identity/resource pair and operation.
 
+### BOLA response ID verification
+
+`response_id_path` identifies the JSON field containing a returned resource ID. It defaults to `id` and supports nested fields, numeric array indexes, and wildcard selection.
+
+Examples: `id`, `data.order.id`, `data.orders[0].id`, and `data.orders[*].id`.
+
+Wildcard paths extract multiple IDs. Duplicate IDs are removed while preserving order. String and integer IDs are accepted; invalid individual values are skipped. Extraction is bounded to 100 candidate values at each traversal step and a maximum of 100 unique IDs. Missing paths, unusable values, or exceeding either limit produce an inconclusive check rather than an automatic finding.
+
+A BOLA finding requires verification that the requested resource ID appears among the returned IDs when policy expected denial. Extracted IDs are used only for verification and evidence; AuthMatrix does not automatically send requests for discovered IDs. Existing request, response-size, scope, and redaction limits remain in force.
+
 `GET`, `HEAD`, and `OPTIONS` are the only methods permitted by default. The
 included demo server is read-only. The policy parser rejects destructive methods
 unless `scope.allow_destructive: true` is deliberately set; keep it disabled
