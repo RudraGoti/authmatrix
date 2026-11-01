@@ -1,163 +1,362 @@
 # AuthMatrix
 
-Policy-driven API authorization checks for **explicitly authorized local
-targets**. The MVP tests configured BOLA/IDOR and BFLA authorization decisions,
-and produces sanitized JSON or HTML reports.
+**Policy-driven API authorization testing for explicitly authorized local targets.**
 
-> **Scope boundary:** AuthMatrix currently accepts only literal loopback IPs
-> (`127.0.0.1` or `::1`). It does not scan public hosts, resolve hostnames,
-> follow redirects, or store response bodies. Use it only on systems you own or
-> are authorized to test.
+AuthMatrix is a Python-based API security testing tool designed to identify authorization weaknesses such as **BOLA/IDOR** and **BFLA** through policy-driven testing. It evaluates access-control decisions across configured identities, resources, and operations, then generates sanitized JSON or HTML reports.
 
-## Requirements and installation
+> [!WARNING]
+> **Scope boundary:** AuthMatrix currently accepts only literal loopback IPs (`127.0.0.1` or `::1`). It does not scan public hosts, resolve hostnames, follow redirects, or store response bodies. Use it only on systems you own or are explicitly authorized to test.
 
-- Python 3.11 or newer (the project has also been installed and exercised with
-  Python 3.14.2).
-- The included demo lab binds only to loopback.
+---
+
+## Features
+
+- Policy-driven API authorization testing.
+- BOLA/IDOR and BFLA authorization checks.
+- Multi-identity and resource ownership validation.
+- OpenAPI 3.x inventory importer.
+- Configurable request, response-size, and timeout limits.
+- Environment-based authentication credentials.
+- JSON and HTML security reports.
+- Scan baseline comparison.
+- Local vulnerable and fixed API lab environments.
+- FastAPI backend for local API access.
+- Sanitized findings and evidence handling.
+
+## Requirements
+
+- Python 3.11 or newer.
+- Git.
+- A virtual environment (recommended).
+
+The project has also been installed and exercised with Python 3.14.2.
+
+## Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/RudraGoti/authmatrix.git
+cd authmatrix
+```
+
+Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
-. .venv/bin/activate
+source .venv/bin/activate
+```
+
+Install AuthMatrix and development dependencies:
+
+```bash
 python -m pip install -e ".[dev]"
 ```
 
-Verify installation and policy:
+Verify the installation:
 
 ```bash
 authmatrix version
 authmatrix config-check --config examples/policy.yaml
 ```
 
-Add credentials to the process environment; the sample tokens are only for the
-local demo:
+## Configure authentication
+
+Add the local demo credentials to your process environment:
 
 ```bash
 export AUTHMATRIX_ALICE_TOKEN=alice-local-token
 export AUTHMATRIX_BOB_TOKEN=bob-local-token
 export AUTHMATRIX_ADMIN_TOKEN=admin-local-token
-authmatrix config-check --config examples/policy.yaml --check-auth-env
 ```
 
-## Quick start: safe local lab
+Validate the authentication environment:
 
-In terminal 1, start the deliberately vulnerable, read-only API:
+```bash
+authmatrix config-check \
+  --config examples/policy.yaml \
+  --check-auth-env
+```
+
+> [!NOTE]
+> These sample credentials are intended only for the local demonstration environment.
+
+---
+
+## Quick Start: Safe Local Lab
+
+AuthMatrix includes a deliberately vulnerable and a fixed read-only API lab.
+
+**Terminal 1 — Start the vulnerable lab:**
 
 ```bash
 authmatrix lab --mode vulnerable --host 127.0.0.1 --port 8000
 ```
 
-In terminal 2, run the policy matrix and render a report:
+**Terminal 2 — Run authorization tests:**
 
 ```bash
-authmatrix test --config examples/policy.yaml --output scan-results.json
-authmatrix report scan-results.json --format html --output reports/vulnerable.html
+authmatrix test \
+  --config examples/policy.yaml \
+  --output scan-results.json
 ```
 
-The vulnerable demo should report object access and administrator-function
-access for non-authorized identities. Stop it with Ctrl+C, then start the fixed
-version using the same command with `--mode fixed`. The same test policy should
-then pass with no findings.
-
-The policy includes 9 expected requests (three identities against two owned
-items and one administrator-only operation). If a local port is changed, update
-`scope.base_url` in a copied policy file. To inspect an API description without
-making network requests:
+Generate an HTML report:
 
 ```bash
-authmatrix import-openapi examples/openapi.yaml --output openapi-inventory.json
+authmatrix report scan-results.json \
+  --format html \
+  --output reports/vulnerable.html
 ```
 
-Run the test suite and lint:
+The vulnerable demo should report object-access and administrator-function access for unauthorized identities.
+
+Stop the vulnerable lab with `Ctrl+C`, then start the fixed version:
 
 ```bash
-python -m pytest
-ruff check .
+authmatrix lab --mode fixed --host 127.0.0.1 --port 8000
 ```
 
-## Policy and architecture
+Run the same policy again. The fixed implementation should pass without authorization findings.
 
-`examples/policy.yaml` explicitly declares:
+The example policy contains 9 expected requests: three identities against two owned items and one administrator-only operation.
 
-- an authorized loopback target and an exact allowed-host list;
-- request, response-size, and timeout limits;
-- identities with roles and environment-variable-backed bearer credentials;
-- resource IDs and ownership metadata;
-- expected allow/deny decisions for every identity/resource pair and operation.
+If you change the local lab port, update `scope.base_url` in a copied policy file.
 
-### BOLA response ID verification
+---
 
-`response_id_path` identifies the JSON field containing a returned resource ID. It defaults to `id` and supports nested fields, numeric array indexes, and wildcard selection.
+## Local API
 
-Examples: `id`, `data.order.id`, `data.orders[0].id`, and `data.orders[*].id`.
+AuthMatrix includes a FastAPI backend that exposes local health, status, and authorization-scanning endpoints.
 
-Wildcard paths extract multiple IDs. Duplicate IDs are removed while preserving order. String and integer IDs are accepted; invalid individual values are skipped. Extraction is bounded to 100 candidate values at each traversal step and a maximum of 100 unique IDs. Missing paths, unusable values, or exceeding either limit produce an inconclusive check rather than an automatic finding.
+### Start the API
 
-A BOLA finding requires verification that the requested resource ID appears among the returned IDs when policy expected denial. Extracted IDs are used only for verification and evidence; AuthMatrix does not automatically send requests for discovered IDs. Existing request, response-size, scope, and redaction limits remain in force.
+From the repository root:
 
-`GET`, `HEAD`, and `OPTIONS` are the only methods permitted by default. The
-included demo server is read-only. The policy parser rejects destructive methods
-unless `scope.allow_destructive: true` is deliberately set; keep it disabled
-unless testing a disposable, explicitly authorized local service.
+```bash
+source .venv/bin/activate
+uvicorn authmatrix.web.app:app --host 127.0.0.1 --port 8001
+```
 
-The OpenAPI importer parses local OpenAPI 3.x JSON/YAML and extracts supported
-HTTP operations with their path, query, and header parameters. It merges
-path-level parameters with operation-level parameters, allowing operation-level
-definitions to override matching path-level definitions. Required path parameters
-must match the route placeholders. Invalid definitions, unsupported parameter
-locations, styles, content-based parameters, and unresolved parameter references
-are rejected.
+The API listens at:
 
-The importer does not fetch remote references, select a scan target, generate
-parameter values, or infer access-control rules. Imported parameters are inventory
-metadata only; they do not automatically become scan inputs. The policy remains
-the source of expected access decisions. See
-[architecture and safety boundaries](docs/architecture.md).
+```text
+http://127.0.0.1:8001
+```
 
-## Scan baseline comparison
+> [!IMPORTANT]
+> The development server binds to loopback only. Do not expose it to public networks.
+
+### API Documentation
+
+Once the server is running:
+
+| Resource | URL |
+|---|---|
+| Interactive API documentation | http://127.0.0.1:8001/docs |
+| OpenAPI schema | http://127.0.0.1:8001/api/openapi.json |
+
+### Available Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/health` | Returns API health and version information. |
+| `GET` | `/api/status` | Returns readiness and supported capabilities. |
+| `POST` | `/api/scans` | Runs an authorization scan using a YAML policy file. |
+
+### Example Scan Request
+
+The scan endpoint accepts a relative `policy_path` pointing to a YAML policy file inside the configured policy directory.
+
+```json
+{
+  "policy_path": "policy.yaml"
+}
+```
+
+By default, policy files are loaded from the repository's `examples/` directory.
+
+To use a different server-side policy directory, set:
+
+```bash
+export AUTHMATRIX_POLICY_DIR=/path/to/policies
+```
+
+The API does not accept arbitrary target URLs or credentials in scan requests. Existing AuthMatrix policy and scope restrictions remain enforced.
+
+---
+
+## OpenAPI Import
+
+AuthMatrix can inspect a local OpenAPI 3.x JSON or YAML description without making network requests.
+
+```bash
+authmatrix import-openapi \
+  examples/openapi.yaml \
+  --output openapi-inventory.json
+```
+
+The importer extracts supported HTTP operations and their path, query, and header parameters.
+
+It does not:
+
+- Fetch remote references.
+- Select a scan target.
+- Generate parameter values.
+- Infer authorization rules.
+- Automatically turn imported parameters into scan inputs.
+
+Imported parameters are inventory metadata only. The policy remains the source of expected access-control decisions.
+
+---
+
+## BOLA Response ID Verification
+
+The `response_id_path` setting identifies the JSON field containing a returned resource ID.
+
+It defaults to `id` and supports:
+
+| Format | Example |
+|---|---|
+| Direct field | `id` |
+| Nested field | `data.order.id` |
+| Array index | `data.orders[0].id` |
+| Wildcard selection | `data.orders[*].id` |
+
+Wildcard paths extract multiple IDs. Duplicate IDs are removed while preserving order.
+
+String and integer IDs are accepted; invalid individual values are skipped.
+
+Extraction is bounded to:
+- 100 candidate values at each traversal step.
+- A maximum of 100 unique IDs.
+
+Missing paths, unusable values, or exceeding either limit produce an inconclusive check rather than an automatic finding.
+
+A BOLA finding requires verification that the requested resource ID appears among the returned IDs when policy expected denial.
+
+Extracted IDs are used only for verification and evidence. AuthMatrix does not automatically send requests for discovered IDs.
+
+Existing request, response-size, scope, and redaction limits remain in force.
+
+---
+
+## Policy and Architecture
+
+The example policy at `examples/policy.yaml` explicitly declares:
+
+- An authorized loopback target and exact allowed-host list.
+- Request, response-size, and timeout limits.
+- Identities with roles and environment-variable-backed bearer credentials.
+- Resource IDs and ownership metadata.
+- Expected allow/deny decisions for every identity/resource pair and operation.
+
+### HTTP Method Restrictions
+
+`GET`, `HEAD`, and `OPTIONS` are the only methods permitted by default.
+
+The included demo server is read-only. The policy parser rejects destructive methods unless:
+
+```yaml
+scope:
+  allow_destructive: true
+```
+
+is deliberately configured.
+
+Keep destructive methods disabled unless testing a disposable, explicitly authorized local service.
+
+For more details, see [Architecture and Safety Boundaries](docs/architecture.md).
+
+---
+
+## Scan Baseline Comparison
 
 Compare a new scan with a previously saved scan report:
 
 ```bash
-authmatrix compare --baseline baseline.json --current current.json --output comparison.json
+authmatrix compare \
+  --baseline baseline.json \
+  --current current.json \
+  --output comparison.json
 ```
 
-Findings are classified as:
-- **New:** present only in the current scan.
-- **Fixed:** present only in the baseline.
-- **Recurring:** present in both scans.
+Findings are classified into three categories:
 
-Matching uses stable fingerprints based on category, operation, HTTP method, path, identity, and resource ID. Changes to title or severity alone do not create a new finding.
+| Classification | Description |
+|---|---|
+| **New** | Present only in the current scan. |
+| **Fixed** | Present only in the baseline. |
+| **Recurring** | Present in both scans. |
 
-Both reports must be valid AuthMatrix scan reports for the same target. Missing, malformed, or incompatible reports are rejected. The comparison output is JSON with summary counts and finding details.
+Matching uses stable fingerprints based on category, operation, HTTP method, path, identity, and resource ID.
 
-## Reports and sensitive data
+Changes to title or severity alone do not create a new finding.
 
-Reports include policy checks, status codes, finding severity, identity labels,
-reproduction method/path, and remediation guidance. They never include request
-headers, tokens, passwords, or response bodies. Treat reports as potentially
-sensitive anyway: routes and identity labels can reveal application structure.
+Both reports must be valid AuthMatrix scan reports for the same target. Missing, malformed, or incompatible reports are rejected.
+
+---
+
+## Reports and Sensitive Data
+
+AuthMatrix reports include:
+
+- Policy checks.
+- HTTP status codes.
+- Finding severity.
+- Identity labels.
+- Reproduction method and path.
+- Remediation guidance.
+
+Reports never include request headers, tokens, passwords, or response bodies.
+
+> [!CAUTION]
+> Treat generated reports as potentially sensitive. Routes and identity labels can reveal application structure. Protect reports and avoid committing sensitive scan results to GitHub.
+
 Generated reports and common scan-result files are ignored by Git.
+
+---
+
+## Testing and Linting
+
+Run the complete test suite:
+
+```bash
+python -m pytest
+```
+
+Run Ruff linting:
+
+```bash
+ruff check .
+```
+
+---
 
 ## Limitations
 
-- This MVP is intentionally loopback-only; it is not a general-purpose remote
-  scanner and does not verify ownership semantics beyond the supplied policy.
-- It currently supports bearer and HTTP Basic credentials from environment
-  variables, not OAuth flows, cookies, client certificates, or secret managers.
-- It tests explicitly declared operations and IDs only. OpenAPI import is an
-  inventory, not automatic test generation.
-- The lab demonstrates read-only GET authorization only; it does not exercise
-  state changes, concurrency, pagination, GraphQL, or multi-step workflows.
-- A finding is an observed successful response where policy expected denial;
-  passing tests do not establish that an API is secure.
+- This MVP is intentionally loopback-only; it is not a general-purpose remote scanner.
+- It does not verify ownership semantics beyond the supplied policy.
+- It currently supports bearer and HTTP Basic credentials from environment variables, not OAuth flows, cookies, client certificates, or secret managers.
+- It tests explicitly declared operations and IDs only.
+- OpenAPI import is an inventory feature, not automatic test generation.
+- The lab demonstrates read-only GET authorization only; it does not exercise state changes, concurrency, pagination, GraphQL, or multi-step workflows.
+- A finding is an observed successful response where policy expected denial. Passing tests do not establish that an API is secure.
 
-## Responsible use
+## Responsible Use
 
-Obtain authorization before testing. Define only identities, operations, and
-resources in scope; use disposable local data; review the policy before each
-run; and protect generated reports. Do not remove the loopback scope restriction
-to test a third-party system.
+Obtain authorization before testing.
+
+Define only identities, operations, and resources in scope. Use disposable local data, review the policy before each run, and protect generated reports.
+
+Do not remove the loopback scope restriction to test a third-party system.
+
+---
 
 ## Screenshots
 
 <!-- Add terminal and HTML report screenshots here when available. -->
+
+---
+
+**Built for learning, testing, and improving API authorization security.**
