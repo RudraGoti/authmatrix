@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0b1120">
+  <meta name="description" content="Local-first API authorization security testing dashboard.">
+  <title>AuthMatrix | Security Dashboard</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/" aria-label="AuthMatrix dashboard">
+        <span class="brand-mark">A</span>
+        <span class="brand-name">AuthMatrix</span>
+      </a>
+
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav class="navigation" aria-label="Main navigation">
+        <a class="nav-link active" href="#dashboard" data-page="dashboard">
+          <span class="nav-icon">▦</span> Dashboard
+        </a>
+        <a class="nav-link" href="#new-scan" data-page="new-scan">
+          <span class="nav-icon">＋</span> New Scan
+        </a>
+        <a class="nav-link" href="#policies" data-page="policies">
+          <span class="nav-icon">◇</span> Policies
+        </a>
+        <a class="nav-link" href="#openapi" data-page="openapi">
+          <span class="nav-icon">⌘</span> OpenAPI
+        </a>
+
+        <div class="sidebar-label section-label">ANALYSIS</div>
+        <a class="nav-link" href="#findings" data-page="findings">
+          <span class="nav-icon">⚑</span> Findings
+        </a>
+        <a class="nav-link" href="#reports" data-page="reports">
+          <span class="nav-icon">▤</span> Reports
+        </a>
+        <a class="nav-link" href="#history" data-page="history">
+          <span class="nav-icon">◷</span> History
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="local-badge"><span class="local-dot"></span> Local workspace</div>
+        <p>AuthMatrix <span id="app-version">v0.1.0</span></p>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="menu-button" id="menu-toggle" aria-label="Toggle navigation"
+                  aria-expanded="false">☰</button>
+          <div>
+            <div class="breadcrumb">Workspace <span>/</span> <strong id="page-name">Dashboard</strong></div>
+            <p class="topbar-subtitle">API authorization security testing</p>
+          </div>
+        </div>
+
+        <div class="connection-status" id="connection-status" role="status"
+             aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="connection-label">Checking API...</span>
+        </div>
+      </header>
+
+      <section class="page-content" id="dashboard-page">
+        <div class="welcome-row">
+          <div>
+            <p class="eyebrow">SECURITY OVERVIEW</p>
+            <h1>Dashboard</h1>
+            <p class="muted">Monitor your authorization testing workspace.</p>
+          </div>
+          <a class="primary-button" href="#new-scan" data-page="new-scan">＋ New scan</a>
+        </div>
+
+        <div class="notice" id="api-notice" role="status" aria-live="polite">
+          <span class="notice-indicator"></span>
+          <div>
+            <strong id="api-notice-title">Connecting to local API</strong>
+            <p id="api-notice-message">Checking whether the AuthMatrix backend is available.</p>
+          </div>
+        </div>
+
+        <div class="section-heading">
+          <div>
+            <h2>Workspace overview</h2>
+            <p class="muted">Live backend information</p>
+          </div>
+          <span class="live-label"><span></span> LIVE STATUS</span>
+        </div>
+
+        <div class="stats-grid">
+          <article class="stat-card">
+            <div class="stat-top"><span>Total scans</span><span class="stat-icon">◷</span></div>
+            <div class="stat-value" id="total-scans-stat">—</div>
+            <p class="stat-foot">Retained scan history</p>
+          </article>
+          <article class="stat-card">
+            <div class="stat-top"><span>Completed</span><span class="stat-icon">✓</span></div>
+            <div class="stat-value" id="completed-scans-stat">—</div>
+            <p class="stat-foot">Completed policy scans</p>
+          </article>
+          <article class="stat-card">
+            <div class="stat-top"><span>Failed</span><span class="stat-icon">!</span></div>
+            <div class="stat-value" id="failed-scans-stat">—</div>
+            <p class="stat-foot">Scans not completed</p>
+          </article>
+          <article class="stat-card">
+            <div class="stat-top"><span>Findings</span><span class="stat-icon">⚑</span></div>
+            <div class="stat-value" id="findings-stat">—</div>
+            <p class="stat-foot">From retained completed scans</p>
+          </article>
+        </div>
+
+        <div class="content-grid">
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>Quick actions</h2><p class="muted">Start working with AuthMatrix</p></div>
+            </div>
+            <div class="action-list">
+              <a class="action-item" href="#new-scan" data-page="new-scan">
+                <span class="action-icon">＋</span>
+                <span><strong>Start a new scan</strong><small>Configure an authorization test</small></span>
+                <span class="action-arrow">→</span>
+              </a>
+              <a class="action-item" href="#policies" data-page="policies">
+                <span class="action-icon">◇</span>
+                <span><strong>Review policies</strong><small>Inspect your configured test policies</small></span>
+                <span class="action-arrow">→</span>
+              </a>
+              <a class="action-item" href="#openapi" data-page="openapi">
+                <span class="action-icon">⌘</span>
+                <span><strong>OpenAPI inventory</strong><small>Prepare API operation coverage</small></span>
+                <span class="action-arrow">→</span>
+              </a>
+            </div>
+          </section>
+
+          <section class="panel system-panel">
+            <div class="panel-heading">
+              <div><h2>System information</h2><p class="muted">Local backend connection</p></div>
+            </div>
+            <div class="system-row"><span>Service</span><strong>AuthMatrix API</strong></div>
+            <div class="system-row"><span>Health endpoint</span><code>/api/health</code></div>
+            <div class="system-row"><span>Status endpoint</span><code>/api/status</code></div>
+            <div class="system-row"><span>Version</span><strong id="version-stat">—</strong></div>
+            <div class="system-row"><span>Capabilities</span><strong id="capability-stat">—</strong></div>
+            <button class="text-button" id="refresh-status">↻ Refresh connection</button>
+          </section>
+        </div>
+
+        <section class="panel activity-panel">
+          <div class="panel-heading">
+            <div><h2>Recent activity</h2><p class="muted">Persisted scan activity</p></div>
+            <a class="text-button" href="#history" data-page="history">View history →</a>
+          </div>
+          <div id="recent-activity" class="activity-list" role="list"
+               aria-live="polite" aria-busy="true">
+            <p class="muted" role="status">Loading recent activity...</p>
+          </div>
+        </section>
+
+        <footer class="page-footer">
+          <span>AuthMatrix · Local-first API authorization testing</span>
+          <span>Built for explicitly authorized targets</span>
+        </footer>
+      </section>
+
+      <section class="page-content" id="new-scan-page" hidden>
+        <div class="welcome-row">
+          <div>
+            <p class="eyebrow">AUTHORIZATION TESTING</p>
+            <h1>New Scan</h1>
+            <p class="muted">Launch a policy-driven authorization assessment against an explicitly authorized target.</p>
+          </div>
+        </div>
+
+        <div class="notice">
+          <span class="notice-indicator"></span>
+          <div>
+            <strong>Local-first and scope-controlled</strong>
+            <p>Credentials are read by the backend from its environment. This form never requests or displays secrets.</p>
+          </div>
+        </div>
+
+        <section class="panel scan-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Scan configuration</h2>
+              <p class="muted">Select a validated policy from your local workspace.</p>
+            </div>
+          </div>
+
+          <form id="scan-form">
+            <label for="policy-select">Authorization policy</label>
+            <select id="policy-select" name="policy_path" required>
+              <option value="">Loading available policies...</option>
+            </select>
+            <p class="muted" id="policy-help">Only valid AuthMatrix YAML policy files are listed.</p>
+            <label for="openapi-select">OpenAPI document (optional)</label>
+            <select id="openapi-select" name="openapi_spec">
+              <option value="">Use policy-defined operations only</option>
+            </select>
+            <label for="values-select">Explicit values mapping (required with OpenAPI)</label>
+            <select id="values-select" name="values_mapping">
+              <option value="">Select a local mapping file</option>
+            </select>
+            <p class="muted">OpenAPI values are never inferred from examples or schemas. Incomplete operations are skipped with an explanation.</p>
+            <div class="policy-review" id="policy-review" role="status" hidden></div>
+            <label class="authorization-confirmation" for="authorization-confirmed">
+              <input id="authorization-confirmed" type="checkbox" required>
+              I confirm I am authorized to test the target defined in this policy.
+            </label>
+
+            <div class="scan-actions">
+              <button class="primary-button" id="start-scan" type="submit" disabled>Start authorization scan</button>
+              <button class="secondary-button" id="reload-policies" type="button">↻ Reload policies</button>
+            </div>
+          </form>
+
+          <div id="scan-message" class="scan-message" role="status" aria-live="polite" hidden></div>
+        </section>
+
+        <section class="panel scan-results" id="scan-results" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2>Scan results</h2>
+              <p class="muted" id="scan-result-summary">Results from the latest scan.</p>
+            </div>
+          </div>
+          <pre id="scan-result-data"></pre>
+        </section>
+      </section>
+
+      <section class="page-content" id="workspace-page" hidden>
+        <div class="welcome-row">
+          <div>
+            <p class="eyebrow">WORKSPACE</p>
+            <h1 id="workspace-title">Workspace</h1>
+            <p class="muted" id="workspace-description"></p>
+          </div>
+          <button class="secondary-button" id="refresh-workspace" type="button">↻ Refresh</button>
+        </div>
+        <div id="workspace-message" class="scan-message" role="status" aria-live="polite" hidden></div>
+        <div id="workspace-content" class="workspace-content"></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

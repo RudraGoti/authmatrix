@@ -1,5 +1,7 @@
 """Sanitized exception handling for the AuthMatrix web API."""
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -11,6 +13,19 @@ from authmatrix.errors import (
     ScopeError,
 )
 
+logger = logging.getLogger(__name__)
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    ),
+}
+
 
 def register_error_handlers(app: FastAPI) -> None:
     """Register handlers that never expose raw exception details."""
@@ -20,12 +35,17 @@ def register_error_handlers(app: FastAPI) -> None:
         request: Request,
         exc: Exception,
     ) -> JSONResponse:
+        logger.error("Unexpected AuthMatrix server error (%s).", type(exc).__name__)
+        headers = dict(SECURITY_HEADERS)
+        if request.url.path == "/api" or request.url.path.startswith("/api/"):
+            headers["Cache-Control"] = "no-store"
         return JSONResponse(
             status_code=500,
             content={
                 "error": "internal_server_error",
                 "detail": "An unexpected server error occurred.",
             },
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -76,7 +96,8 @@ def register_error_handlers(app: FastAPI) -> None:
             status_code=422,
             content={
                 "error": "scan_error",
-                "detail": "The scan could not be completed safely.",
+                "detail": exc.public_detail
+                or "The scan could not be completed safely.",
             },
         )
 

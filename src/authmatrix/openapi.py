@@ -3,18 +3,102 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from authmatrix.errors import OpenAPIError
+from authmatrix.reporting import sanitize_results
 
 HTTP_METHODS = {"get", "head", "options", "post", "put", "patch", "delete"}
 PARAMETER_LOCATIONS = {"path", "query", "header"}
 PATH_PARAMETER_PATTERN = re.compile(r"\{([^{}]+)\}")
 OPENAPI_VERSION_PATTERN = re.compile(r"3\.\d+\.\d+")
+DEFAULT_MAX_OPENAPI_BYTES = 2 * 1024 * 1024
+OPENAPI_SAMPLE_VALUE_KEYS = {"const", "default", "enum", "example", "examples"}
+
+
+def _validate_document_tree(document: dict[str, Any]) -> None:
+    """Bound YAML/JSON nesting and reject cyclic YAML aliases."""
+    active: set[int] = set()
+    visited: set[int] = set()
+    stack: list[tuple[Any, int, bool]] = [(document, 0, False)]
+    nodes = 0
+    while stack:
+        value, depth, exiting = stack.pop()
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise OpenAPIError(
+                    "OpenAPI document contains invalid Unicode text."
+                ) from exc
+            continue
+        if not isinstance(value, (dict, list)):
+            continue
+        identity = id(value)
+        if exiting:
+            active.remove(identity)
+            visited.add(identity)
+            continue
+        if identity in active:
+            raise OpenAPIError("OpenAPI document contains a cyclic YAML alias.")
+        if identity in visited:
+            continue
+        if depth > 100:
+            raise OpenAPIError("OpenAPI document nesting exceeds 100 levels.")
+        nodes += 1
+        if nodes > 100_000:
+            raise OpenAPIError("OpenAPI document contains too many structured values.")
+        active.add(identity)
+        stack.append((value, depth, True))
+        children = (
+            (
+                item
+                for key, child in value.items()
+                for item in (key, child)
+            )
+            if isinstance(value, dict)
+            else value
+        )
+        stack.extend((child, depth + 1, False) for child in children)
+
+
+def _reject_schema_references(value: Any, label: str) -> None:
+    if isinstance(value, dict):
+        if "$ref" in value:
+            raise OpenAPIError(
+                f"Referenced schemas are not supported in {label}; "
+                "define the schema locally."
+            )
+        for item in value.values():
+            _reject_schema_references(item, label)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_schema_references(item, label)
+
+
+def _remove_openapi_sample_values(value: Any) -> Any:
+    if isinstance(value, dict):
+            return {
+                key: _remove_openapi_sample_values(item)
+                for key, item in value.items()
+                if not isinstance(key, str)
+                or key.lower() not in OPENAPI_SAMPLE_VALUE_KEYS
+            }
+    if isinstance(value, list):
+            return [_remove_openapi_sample_values(item) for item in value]
+    return value
+
+
+def sanitize_openapi_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Remove schema samples and recognizable secrets from inventory output."""
+    sanitized = sanitize_results(_remove_openapi_sample_values(inventory))
+    return sanitized
 
 
 def _validate_parameter(parameter: Any, route: str, method: str) -> dict[str, Any]:
@@ -60,24 +144,47 @@ def _validate_parameter(parameter: Any, route: str, method: str) -> dict[str, An
         raise OpenAPIError(
             f"Parameter '{name}' in {label} must define schema as an object."
         )
+    _reject_schema_references(schema, f"parameter '{name}' in {label}")
 
-    style = parameter.get("style")
+    default_styles = {"path": "simple", "query": "form", "header": "simple"}
+    style = parameter.get("style", default_styles[location])
     supported_styles = {
         "path": {"simple", "label", "matrix"},
         "query": {"form", "spaceDelimited", "pipeDelimited", "deepObject"},
         "header": {"simple"},
     }
-    if style is not None and (
-        not isinstance(style, str) or style not in supported_styles[location]
-    ):
+    if not isinstance(style, str) or style not in supported_styles[location]:
         raise OpenAPIError(f"Parameter '{name}' in {label} uses an unsupported style.")
 
-    return {
+    explode = parameter.get("explode", style == "form")
+    if not isinstance(explode, bool):
+        raise OpenAPIError(
+            f"Parameter '{name}' in {label} must use a boolean explode value."
+        )
+    allow_reserved = parameter.get("allowReserved", False)
+    if not isinstance(allow_reserved, bool):
+        raise OpenAPIError(
+            f"Parameter '{name}' in {label} must use a boolean allowReserved value."
+        )
+    allow_empty = parameter.get("allowEmptyValue", False)
+    if not isinstance(allow_empty, bool):
+        raise OpenAPIError(
+            f"Parameter '{name}' in {label} must use a boolean allowEmptyValue value."
+        )
+
+    normalized = {
         "name": name,
         "in": location,
         "required": required,
         "schema": schema,
+        "style": style,
+        "explode": explode,
     }
+    if allow_reserved:
+        normalized["allow_reserved"] = True
+    if allow_empty:
+        normalized["allow_empty_value"] = True
+    return normalized
 
 
 def _extract_parameters(
@@ -139,10 +246,98 @@ def _extract_parameters(
     )
 
 
-def parse_openapi(path: str | Path) -> dict[str, Any]:
+def _extract_request_body(operation: dict[str, Any], route: str, method: str) -> dict:
+    """Validate a local request-body description without resolving references."""
+    request_body = operation.get("requestBody")
+    if request_body is None:
+        return {"required": False, "content": {}}
+    if not isinstance(request_body, dict):
+        raise OpenAPIError(
+            f"Request body for {method.upper()} {route} must be an object."
+        )
+    if "$ref" in request_body:
+        raise OpenAPIError(
+            f"Referenced request bodies are not supported for "
+            f"{method.upper()} {route}; define the body locally."
+        )
+
+    required = request_body.get("required", False)
+    content = request_body.get("content")
+    if not isinstance(required, bool) or not isinstance(content, dict) or not content:
+        raise OpenAPIError(
+            f"Request body for {method.upper()} {route} must define a boolean "
+            "required value and non-empty content mapping."
+        )
+
+    normalized_content = {}
+    for media_type, definition in content.items():
+        if (
+            not isinstance(media_type, str)
+            or not media_type.strip()
+            or not isinstance(definition, dict)
+        ):
+            raise OpenAPIError(
+                f"Request body content for {method.upper()} {route} is invalid."
+            )
+        schema = definition.get("schema")
+        if schema is not None and not isinstance(schema, dict):
+            raise OpenAPIError(
+                f"Request body schema for {method.upper()} {route} "
+                "must be an object."
+            )
+        if schema is not None:
+            _reject_schema_references(
+                schema,
+                f"request body for {method.upper()} {route}",
+            )
+        normalized_content[media_type.lower()] = {"schema": schema}
+    return {"required": required, "content": normalized_content}
+
+
+def parse_openapi(
+    path: str | Path,
+    *,
+    max_bytes: int = DEFAULT_MAX_OPENAPI_BYTES,
+) -> dict[str, Any]:
     source = Path(path)
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or max_bytes < 1
+    ):
+        raise ValueError("The OpenAPI size limit must be a positive integer.")
+
     try:
-        text = source.read_text(encoding="utf-8")
+        if source.stat().st_size > max_bytes:
+            raise OpenAPIError(
+                f"OpenAPI document exceeds the {max_bytes}-byte size limit."
+            )
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise OpenAPIError(f"Cannot read OpenAPI document: {source}") from exc
+
+    try:
+        with os.fdopen(descriptor, "rb") as source_file:
+            info = os.fstat(source_file.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise OpenAPIError("OpenAPI document must be a regular local file.")
+            if info.st_size > max_bytes:
+                raise OpenAPIError(
+                    f"OpenAPI document exceeds the {max_bytes}-byte size limit."
+                )
+            content = source_file.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                raise OpenAPIError(
+                    f"OpenAPI document exceeds the {max_bytes}-byte size limit."
+                )
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OpenAPIError(
+            f"OpenAPI document is not valid UTF-8: {source}"
+        ) from exc
     except OSError as exc:
         raise OpenAPIError(f"Cannot read OpenAPI document: {source}") from exc
 
@@ -152,13 +347,14 @@ def parse_openapi(path: str | Path) -> dict[str, Any]:
             if source.suffix.lower() == ".json"
             else yaml.safe_load(text)
         )
-    except (json.JSONDecodeError, yaml.YAMLError) as exc:
+    except (json.JSONDecodeError, yaml.YAMLError, RecursionError) as exc:
         raise OpenAPIError(
             f"OpenAPI document is not valid JSON or YAML: {source}"
         ) from exc
 
     if not isinstance(document, dict):
         raise OpenAPIError("OpenAPI document root must be a mapping.")
+    _validate_document_tree(document)
 
     if not isinstance(
         document.get("openapi"), str
@@ -170,6 +366,7 @@ def parse_openapi(path: str | Path) -> dict[str, Any]:
         raise OpenAPIError("OpenAPI document must define at least one path.")
 
     operations = []
+    operation_ids: set[str] = set()
     for route, path_item in paths.items():
         if (
             not isinstance(route, str)
@@ -180,6 +377,12 @@ def parse_openapi(path: str | Path) -> dict[str, Any]:
                 "Every OpenAPI path must start with '/' and map to an object."
             )
 
+        if "$ref" in path_item:
+            raise OpenAPIError(
+                f"Referenced path items are not supported for {route}; "
+                "define operations locally."
+            )
+
         for method, operation in path_item.items():
             if not isinstance(method, str) or method.lower() not in HTTP_METHODS:
                 continue
@@ -188,15 +391,43 @@ def parse_openapi(path: str | Path) -> dict[str, Any]:
                 raise OpenAPIError(
                     f"Operation {method.upper()} {route} must be an object."
                 )
+            if "$ref" in operation:
+                raise OpenAPIError(
+                    f"Referenced operations are not supported for "
+                    f"{method.upper()} {route}; define the operation locally."
+                )
+
+            for metadata_field in ("operationId", "summary"):
+                metadata_value = operation.get(metadata_field)
+                if metadata_value is not None and not isinstance(metadata_value, str):
+                    raise OpenAPIError(
+                        f"{metadata_field} for {method.upper()} {route} "
+                        "must be a string."
+                    )
 
             parameters = _extract_parameters(path_item, operation, route, method)
+            operation_id = operation.get("operationId")
+            if operation_id is not None:
+                if not operation_id.strip():
+                    raise OpenAPIError(
+                        f"operationId for {method.upper()} {route} "
+                        "must not be empty."
+                    )
+                if operation_id in operation_ids:
+                    raise OpenAPIError(
+                        f"Duplicate OpenAPI operationId: {operation_id}."
+                    )
+                operation_ids.add(operation_id)
             operations.append(
                 {
                     "method": method.upper(),
                     "path": route,
-                    "operation_id": operation.get("operationId"),
+                    "operation_id": operation_id,
                     "summary": operation.get("summary"),
                     "parameters": parameters,
+                    "request_body": _extract_request_body(
+                        operation, route, method
+                    ),
                 }
             )
 
@@ -215,7 +446,7 @@ def parse_openapi(path: str | Path) -> dict[str, Any]:
 
 
 def write_operation_inventory(path: str | Path, output: str | Path) -> int:
-    inventory = parse_openapi(path)
+    inventory = sanitize_openapi_inventory(parse_openapi(path))
     destination = Path(output)
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)

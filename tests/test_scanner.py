@@ -9,11 +9,13 @@ import pytest
 
 from authmatrix.config import AuthConfig, Identity, load_config
 from authmatrix.errors import ScanError, ScopeError
+from authmatrix.openapi_scan import compile_openapi_operations
 from authmatrix.scanner import (
     _auth_for,
     _parse_returned_object_id,
     _parse_returned_object_ids,
     run_authorization_tests,
+    write_scan_results,
 )
 
 
@@ -62,6 +64,48 @@ def test_fixed_lab_has_no_authorization_findings(
 
     result = run_authorization_tests(config)
 
+    assert result["summary"]["findings"] == 0
+    assert result["summary"]["failed"] == 0
+
+
+def test_openapi_operations_find_vulnerable_lab_access(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+) -> None:
+    config = _config(config_path, demo_server, tmp_path)
+    compiled, skipped = compile_openapi_operations(
+        config,
+        config_path.parent / "openapi.yaml",
+        config_path.parent / "openapi.mapping.yaml",
+    )
+
+    result = run_authorization_tests(compiled)
+
+    assert skipped == []
+    assert result["summary"]["requests"] == 9
+    assert result["summary"]["findings"] == 4
+    assert result["summary"]["inconclusive"] == 0
+
+
+@pytest.mark.parametrize("demo_server", ["fixed"], indirect=True)
+def test_openapi_operations_have_no_findings_against_fixed_lab(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+) -> None:
+    config = _config(config_path, demo_server, tmp_path)
+    compiled, skipped = compile_openapi_operations(
+        config,
+        config_path.parent / "openapi.yaml",
+        config_path.parent / "openapi.mapping.yaml",
+    )
+
+    result = run_authorization_tests(compiled)
+
+    assert skipped == []
     assert result["summary"]["findings"] == 0
     assert result["summary"]["failed"] == 0
 
@@ -138,6 +182,72 @@ def test_report_does_not_contain_authentication_secrets(
     assert "admin-local-token" not in serialized
 
 
+def test_scan_result_writer_does_not_overwrite_without_explicit_force(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "existing-results.json"
+    output.write_text("keep this file", encoding="utf-8")
+
+    with pytest.raises(ScanError, match="already exists"):
+        write_scan_results({"schema_version": 1}, output)
+
+    assert output.read_text(encoding="utf-8") == "keep this file"
+    write_scan_results({"schema_version": 1}, output, overwrite=True)
+    assert json.loads(output.read_text(encoding="utf-8")) == {"schema_version": 1}
+
+
+def test_scanner_sends_bearer_tokens_without_recording_them(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import authmatrix.scanner as scanner
+
+    sent_headers = []
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def iter_bytes(self):
+            yield b'{"id":"1"}'
+
+    class MockClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **kwargs):
+            sent_headers.append(kwargs["headers"])
+            return MockResponse()
+
+    monkeypatch.setattr(scanner.httpx, "Client", MockClient)
+    config = _config(config_path, demo_server, tmp_path)
+
+    result = run_authorization_tests(config)
+
+    assert {"Authorization": "Bearer alice-local-token"} in sent_headers
+    assert {"Authorization": "Bearer bob-local-token"} in sent_headers
+    assert {"Authorization": "Bearer admin-local-token"} in sent_headers
+    serialized = json.dumps(result)
+    assert "alice-local-token" not in serialized
+    assert "bob-local-token" not in serialized
+    assert "admin-local-token" not in serialized
+
+
 def test_basic_auth_uses_environment_credentials(monkeypatch) -> None:
     monkeypatch.setenv("TEST_BASIC_USER", "test-user")
     monkeypatch.setenv("TEST_BASIC_PASSWORD", "test-password")
@@ -157,6 +267,38 @@ def test_basic_auth_uses_environment_credentials(monkeypatch) -> None:
     assert headers == {}
     assert isinstance(auth, httpx.BasicAuth)
 
+
+def test_bearer_auth_uses_environment_token(monkeypatch) -> None:
+    token = "test-only-bearer-token"
+    monkeypatch.setenv("TEST_BEARER_TOKEN", token)
+    identity = Identity(
+        name="tester",
+        role="user",
+        auth=AuthConfig(kind="bearer", token_env="TEST_BEARER_TOKEN"),
+    )
+
+    headers, auth = _auth_for(identity)
+
+    assert headers == {"Authorization": f"Bearer {token}"}
+    assert auth is None
+
+
+def test_basic_auth_missing_credentials_are_reported(monkeypatch) -> None:
+    monkeypatch.delenv("TEST_BASIC_USER", raising=False)
+    monkeypatch.delenv("TEST_BASIC_PASSWORD", raising=False)
+
+    identity = Identity(
+        name="tester",
+        role="user",
+        auth=AuthConfig(
+            kind="basic",
+            username_env="TEST_BASIC_USER",
+            password_env="TEST_BASIC_PASSWORD",
+        ),
+    )
+
+    with pytest.raises(ScanError, match="Missing basic-auth environment variables"):
+        _auth_for(identity)
 
 def test_request_limit_is_checked_before_network(
     config_path: Path,
@@ -232,6 +374,36 @@ def test_policy_owner_mapping_identifies_cross_user_access(
 
     # Bob accessing Alice's resource is a cross-user access attempt.
     assert owners["1"] != "bob"
+
+
+def test_bola_without_configured_resource_owner_is_inconclusive(
+    config_path: Path,
+    demo_server: int,
+    auth_env,
+    tmp_path: Path,
+) -> None:
+    config = _config(config_path, demo_server, tmp_path)
+    operation = next(item for item in config.operations if item.category == "BOLA")
+    identity = config.identities["bob"]
+    operation = replace(operation, expected={"bob": {"1": "deny"}})
+    resource = replace(
+        config.resources["items"],
+        ids=("1",),
+        owner_by_id={},
+    )
+    config = replace(
+        config,
+        identities={"bob": identity},
+        resources={"items": resource},
+        operations=(operation,),
+    )
+
+    result = run_authorization_tests(config)
+
+    assert result["summary"]["inconclusive"] == 1
+    assert result["summary"]["findings"] == 0
+    assert result["checks"][0]["resource_owner"] is None
+    assert result["checks"][0]["cross_user_access_verified"] is False
 
 
 @pytest.mark.parametrize(
@@ -455,6 +627,8 @@ def test_verified_unauthorized_object_access_creates_finding(
     assert finding["category"] == "BOLA"
     assert finding["severity"] == "high"
     assert finding["evidence"]["object_id_verified"] is True
+    assert finding["evidence"]["resource_owner"] == "alice"
+    assert finding["evidence"]["cross_user_access_verified"] is True
     assert finding["evidence"]["requested_resource_id"] == "1"
     assert finding["evidence"]["returned_resource_ids"] == ["1", "2"]
     assert "returned_resource_id" not in finding["evidence"]

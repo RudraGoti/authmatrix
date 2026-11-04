@@ -16,6 +16,10 @@ class ScopeError(AuthMatrixError):
 class ScanError(AuthMatrixError):
     """A scan could not be completed safely."""
 
+    def __init__(self, message: str, *, public_detail: str | None = None) -> None:
+        super().__init__(message)
+        self.public_detail = public_detail
+
 
 class OpenAPIError(AuthMatrixError):
-    """An OpenAPI document could not be parsed."""
+    """Invalid or unsupported OpenAPI specification."""

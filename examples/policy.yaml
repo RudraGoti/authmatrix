@@ -49,6 +49,7 @@ operations:
     category: BFLA
     method: GET
     path: /admin/reports
+    response_evidence_path: reports[*]
     expected:
       alice: deny
       bob: deny

@@ -21,10 +21,14 @@
       }
     }
   },
-  "forwardPorts": [8000],
+  "forwardPorts": [8000, 8001],
   "portsAttributes": {
     "8000": {
       "label": "AuthMatrix Local Lab",
+      "onAutoForward": "notify"
+    },
+    "8001": {
+      "label": "AuthMatrix Dashboard",
       "onAutoForward": "notify"
     }
   },
