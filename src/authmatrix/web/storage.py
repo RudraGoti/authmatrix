@@ -15,9 +15,10 @@ from typing import Any
 
 
 class ScanStore:
-    """Persist bounded scan metadata and sanitized result documents."""
+    """Persist bounded scan history and local asset inventory records."""
 
     max_scans = 1000
+    max_assets = 5000
 
     def __init__(self, database_path: Path) -> None:
         self.path = database_path.expanduser().absolute()
@@ -188,6 +189,7 @@ class ScanStore:
             )
             connection = sqlite3.connect(database_path, timeout=5)
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
             current_info = os.stat(
                 self.name,
                 dir_fd=directory_fd,
@@ -235,6 +237,243 @@ class ScanStore:
                 "CREATE INDEX IF NOT EXISTS scans_generated_at "
                 "ON scans(generated_at DESC)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS assets (
+                    asset_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+                    asset_type TEXT NOT NULL CHECK (asset_type IN (
+                        'domain', 'subdomain', 'hostname', 'ipv4', 'ipv6',
+                        'ipv4_cidr', 'ipv6_cidr'
+                    )),
+                    canonical_value TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL DEFAULT '',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    organization TEXT NOT NULL DEFAULT 'Local workspace',
+                    authorization_status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (authorization_status IN (
+                            'pending', 'authorized', 'unverified', 'revoked'
+                        )),
+                    authorization_confirmed INTEGER NOT NULL DEFAULT 0
+                        CHECK (authorization_confirmed IN (0, 1)),
+                    authorization_reference TEXT,
+                    authorization_starts_at TEXT,
+                    authorization_expires_at TEXT,
+                    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (authorization_status != 'authorized' OR (
+                        authorization_confirmed = 1
+                        AND authorization_reference IS NOT NULL
+                        AND length(trim(authorization_reference)) > 0
+                    ))
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS assets_type ON assets(asset_type)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS assets_authorization "
+                "ON assets(authorization_status, active)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scope_entries (
+                    asset_id TEXT PRIMARY KEY REFERENCES assets(asset_id)
+                        ON DELETE CASCADE,
+                    direction TEXT NOT NULL CHECK (direction IN ('include', 'exclude')),
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS scope_direction ON scope_entries(direction)"
+            )
+
+    @staticmethod
+    def _asset_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        asset = dict(row)
+        asset["tags"] = json.loads(asset.pop("tags_json"))
+        asset["authorization_confirmed"] = bool(asset["authorization_confirmed"])
+        asset["active"] = bool(asset["active"])
+        return asset
+
+    def create_asset(self, asset: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            count = connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            if count >= self.max_assets:
+                raise ValueError("The asset inventory has reached its size limit.")
+            connection.execute(
+                """
+                INSERT INTO assets (
+                    asset_id, name, asset_type, canonical_value, description,
+                    tags_json, organization, authorization_status,
+                    authorization_confirmed, authorization_reference,
+                    authorization_starts_at, authorization_expires_at,
+                    active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    asset["asset_id"],
+                    asset["name"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["description"],
+                    json.dumps(asset["tags"], ensure_ascii=False),
+                    asset["organization"],
+                    asset["authorization_status"],
+                    int(asset["authorization_confirmed"]),
+                    asset["authorization_reference"],
+                    asset["authorization_starts_at"],
+                    asset["authorization_expires_at"],
+                    asset["created_at"],
+                    asset["updated_at"],
+                ),
+            )
+
+    def list_assets(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM assets ORDER BY name COLLATE NOCASE, asset_id "
+                "LIMIT ?",
+                (self.max_assets,),
+            ).fetchall()
+        return [self._asset_from_row(row) for row in rows]
+
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
+            ).fetchone()
+        return self._asset_from_row(row)
+
+    def update_asset(self, asset_id: str, asset: dict[str, Any]) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE assets SET name = ?, asset_type = ?, canonical_value = ?,
+                    description = ?, tags_json = ?, organization = ?, updated_at = ?,
+                    authorization_status = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN 'pending' ELSE authorization_status END,
+                    authorization_confirmed = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN 0 ELSE authorization_confirmed END,
+                    authorization_reference = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN NULL ELSE authorization_reference END,
+                    authorization_starts_at = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN NULL ELSE authorization_starts_at END,
+                    authorization_expires_at = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN NULL ELSE authorization_expires_at END
+                WHERE asset_id = ?
+                """,
+                (
+                    asset["name"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["description"],
+                    json.dumps(asset["tags"], ensure_ascii=False),
+                    asset["organization"],
+                    asset["updated_at"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def update_authorization(
+        self,
+        asset_id: str,
+        authorization: dict[str, Any],
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE assets SET authorization_status = ?,
+                    authorization_confirmed = ?, authorization_reference = ?,
+                    authorization_starts_at = ?, authorization_expires_at = ?,
+                    updated_at = ?
+                WHERE asset_id = ?
+                """,
+                (
+                    authorization["authorization_status"],
+                    int(authorization["authorization_confirmed"]),
+                    authorization["authorization_reference"],
+                    authorization["authorization_starts_at"],
+                    authorization["authorization_expires_at"],
+                    authorization["updated_at"],
+                    asset_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def set_asset_active(self, asset_id: str, active: bool, updated_at: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE assets SET active = ?, updated_at = ? WHERE asset_id = ?",
+                (int(active), updated_at, asset_id),
+            )
+            return cursor.rowcount == 1
+
+    def delete_asset(self, asset_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM assets WHERE asset_id = ?", (asset_id,)
+            )
+            return cursor.rowcount == 1
+
+    def set_scope_entry(
+        self,
+        asset_id: str,
+        direction: str,
+        created_at: str,
+    ) -> bool:
+        with self._connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM assets WHERE asset_id = ?", (asset_id,)
+            ).fetchone() is None:
+                return False
+            connection.execute(
+                """
+                INSERT INTO scope_entries (asset_id, direction, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    direction = excluded.direction, created_at = excluded.created_at
+                """,
+                (asset_id, direction, created_at),
+            )
+        return True
+
+    def remove_scope_entry(self, asset_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM scope_entries WHERE asset_id = ?", (asset_id,)
+            )
+            return cursor.rowcount == 1
+
+    def list_scope_entries(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT asset_id, direction, created_at FROM scope_entries "
+                "ORDER BY direction, created_at, asset_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def start(
         self,
