@@ -41,6 +41,8 @@ def test_imports_local_openapi_operations(tmp_path: Path) -> None:
             "in": "path",
             "required": True,
             "schema": {"type": "string"},
+            "style": "simple",
+            "explode": False,
         }
     ]
 
@@ -88,14 +90,145 @@ def test_imports_query_and_header_parameters(tmp_path: Path) -> None:
             "in": "header",
             "required": True,
             "schema": {"type": "string"},
+            "style": "simple",
+            "explode": False,
         },
         {
             "name": "limit",
             "in": "query",
             "required": False,
             "schema": {"type": "integer", "minimum": 1},
+            "style": "form",
+            "explode": True,
         },
     ]
+
+
+def test_imports_local_json_request_body_metadata(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {
+            "/items": {
+                "post": {
+                    "operationId": "createItem",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object"},
+                            }
+                        },
+                    },
+                }
+            }
+        },
+    )
+
+    body = parse_openapi(path)["operations"][0]["request_body"]
+
+    assert body == {
+        "required": True,
+        "content": {"application/json": {"schema": {"type": "object"}}},
+    }
+
+
+def test_cli_inventory_removes_examples_defaults_and_secrets(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {
+            "/items": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "token",
+                            "in": "query",
+                            "schema": {
+                                "type": "string",
+                                "example": "secret-example-token",
+                                "default": "secret-default-token",
+                                "enum": ["secret-enum-token"],
+                            },
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    output = tmp_path / "inventory.json"
+
+    write_operation_inventory(path, output)
+
+    serialized = output.read_text(encoding="utf-8")
+    assert "secret-example-token" not in serialized
+    assert "secret-default-token" not in serialized
+    assert "secret-enum-token" not in serialized
+
+
+def test_rejects_referenced_request_body_without_fetching(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {
+            "/items": {
+                "post": {
+                    "requestBody": {
+                        "$ref": "https://example.invalid/request.json"
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(OpenAPIError, match="Referenced request bodies"):
+        parse_openapi(path)
+
+
+def test_rejects_referenced_parameter_schema_without_fetching(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {
+            "/items": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "item_id",
+                            "in": "query",
+                            "schema": {
+                                "$ref": "https://example.invalid/schema.json"
+                            },
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    with pytest.raises(OpenAPIError, match="Referenced schemas"):
+        parse_openapi(path)
+
+
+def test_rejects_cyclic_yaml_aliases(tmp_path: Path) -> None:
+    path = tmp_path / "cyclic.yaml"
+    path.write_text(
+        "openapi: 3.0.3\ninfo: {title: API, version: '1'}\n"
+        "paths: &paths\n  /items: *paths\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OpenAPIError, match="cyclic YAML alias"):
+        parse_openapi(path)
+
+
+def test_rejects_duplicate_openapi_operation_ids(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {
+            "/items": {"get": {"operationId": "duplicate"}},
+            "/users": {"get": {"operationId": "duplicate"}},
+        },
+    )
+
+    with pytest.raises(OpenAPIError, match="Duplicate OpenAPI operationId"):
+        parse_openapi(path)
 
 
 def test_merges_path_and_operation_parameters(tmp_path: Path) -> None:
@@ -134,6 +267,8 @@ def test_merges_path_and_operation_parameters(tmp_path: Path) -> None:
     version = next(item for item in parameters if item["name"] == "version")
     assert version["required"] is True
     assert version["schema"] == {"type": "integer"}
+    assert version["style"] == "form"
+    assert version["explode"] is True
     assert len(parameters) == 2
 
 
@@ -151,6 +286,15 @@ def test_merges_path_and_operation_parameters(tmp_path: Path) -> None:
         (
             {"name": "id", "in": "query", "required": "yes"},
             "boolean required",
+        ),
+        (
+            {
+                "name": "id",
+                "in": "query",
+                "explode": "yes",
+                "schema": {"type": "string"},
+            },
+            "boolean explode",
         ),
         (
             {"name": "id", "in": "query", "schema": "string"},
@@ -244,6 +388,32 @@ def test_rejects_malformed_path_placeholder(tmp_path: Path) -> None:
     path = _write_spec(tmp_path, {"/items/{item_id": {"get": {}}})
 
     with pytest.raises(OpenAPIError, match="malformed path parameter"):
+        parse_openapi(path)
+
+
+def test_rejects_referenced_path_items_without_fetching(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {"/items": {"$ref": "https://example.invalid/openapi.yaml#/paths/items"}},
+    )
+
+    with pytest.raises(OpenAPIError, match="Referenced path items are not supported"):
+        parse_openapi(path)
+
+
+def test_rejects_referenced_operations_without_fetching(tmp_path: Path) -> None:
+    path = _write_spec(
+        tmp_path,
+        {
+            "/items": {
+                "get": {
+                    "$ref": "https://example.invalid/openapi.yaml#/components/getItem"
+                }
+            }
+        },
+    )
+
+    with pytest.raises(OpenAPIError, match="Referenced operations are not supported"):
         parse_openapi(path)
 
 

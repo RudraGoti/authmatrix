@@ -53,6 +53,10 @@ class Operation:
     resource: str | None
     expected: dict[str, Any]
     response_id_path: str = "id"
+    response_evidence_path: str | None = None
+    request_parameters: dict[str, Any] | None = None
+    request_body: Any = None
+    request_content_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -387,11 +391,20 @@ def load_config(path: str | Path, *, check_auth_env: bool = False) -> ScanConfig
             )
 
         response_id_path = entry.get("response_id_path", "id")
+        response_evidence_path = entry.get("response_evidence_path")
 
         if category == "BFLA":
             if "response_id_path" in entry:
                 raise ConfigurationError(
                     f"BFLA operation {operation_id} cannot define response_id_path."
+                )
+            if response_evidence_path is not None and (
+                not isinstance(response_evidence_path, str)
+                or not RESPONSE_ID_PATH.fullmatch(response_evidence_path)
+            ):
+                raise ConfigurationError(
+                    f"Operation {operation_id} has an invalid "
+                    "response_evidence_path."
                 )
         else:
             if (
@@ -484,6 +497,7 @@ def load_config(path: str | Path, *, check_auth_env: bool = False) -> ScanConfig
                 resource,
                 expected,
                 response_id_path,
+                response_evidence_path,
             )
         )
 

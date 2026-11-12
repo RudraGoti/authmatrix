@@ -1,0 +1,9 @@
+operations:
+  read_item:
+    operation_id: readItem
+    parameters:
+      item_id:
+        $authmatrix_resource_id: true
+
+  read_admin_reports:
+    operation_id: readAdminReports

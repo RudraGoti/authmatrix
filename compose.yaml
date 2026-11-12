@@ -1,0 +1,77 @@
+services:
+  authmatrix:
+    build: .
+    image: authmatrix:local
+    environment:
+      AUTHMATRIX_DATA_DIR: /data
+      AUTHMATRIX_POLICY_DIR: /app/examples
+      AUTHMATRIX_OPENAPI_DIR: /app/examples
+      AUTHMATRIX_OPENAPI_MAX_BYTES: "${AUTHMATRIX_OPENAPI_MAX_BYTES:-2097152}"
+      AUTHMATRIX_TRUSTED_ORIGINS: "${AUTHMATRIX_TRUSTED_ORIGINS:-http://127.0.0.1:8001,http://localhost:8001}"
+      AUTHMATRIX_ALICE_TOKEN: "${AUTHMATRIX_ALICE_TOKEN:-}"
+      AUTHMATRIX_BOB_TOKEN: "${AUTHMATRIX_BOB_TOKEN:-}"
+      AUTHMATRIX_ADMIN_TOKEN: "${AUTHMATRIX_ADMIN_TOKEN:-}"
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - authmatrix-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  lab:
+    image: authmatrix:local
+    profiles:
+      - lab
+    command:
+      - authmatrix
+      - lab
+      - --mode
+      - "${AUTHMATRIX_LAB_MODE:-vulnerable}"
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8000"
+    environment:
+      AUTHMATRIX_ALICE_TOKEN: "${AUTHMATRIX_ALICE_TOKEN:-alice-local-token}"
+      AUTHMATRIX_BOB_TOKEN: "${AUTHMATRIX_BOB_TOKEN:-bob-local-token}"
+      AUTHMATRIX_ADMIN_TOKEN: "${AUTHMATRIX_ADMIN_TOKEN:-admin-local-token}"
+    network_mode: "service:authmatrix"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_signal: SIGINT
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=2).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 2s
+    depends_on:
+      authmatrix:
+        condition: service_healthy
+
+volumes:
+  authmatrix-data:

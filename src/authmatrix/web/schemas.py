@@ -31,6 +31,14 @@ class ScanRequest(StrictModel):
         description="Policy file path relative to the configured policy directory.",
         examples=["policy.yaml"],
     )
+    authorization_confirmed: bool = False
+    openapi_spec: str | None = Field(default=None, min_length=1, max_length=255)
+    values_mapping: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class BaselineComparisonRequest(StrictModel):
+    baseline_scan_id: str = Field(min_length=1, max_length=64)
+    current_scan_id: str = Field(min_length=1, max_length=64)
 
 
 class ScanSummary(BaseModel):
@@ -39,16 +47,22 @@ class ScanSummary(BaseModel):
     failed: int
     inconclusive: int
     findings: int
+    skipped: int = 0
 
 
 class ScanResponse(BaseModel):
     status: Literal["completed"] = "completed"
     schema_version: int
+    scan_id: str | None = None
     generated_at: str
     target: str
+    policy: str | None = None
+    identities: list[dict[str, str]] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
     summary: ScanSummary
     findings: list[dict[str, object]]
     checks: list[dict[str, object]]
+    skipped_operations: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

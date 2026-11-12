@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from authmatrix.errors import ScanError
-from authmatrix.reporting import load_results
+from authmatrix.reporting import load_results, validate_results
 
 
 def _finding_fingerprint(finding: Mapping[str, Any]) -> str:
@@ -67,8 +67,19 @@ def compare_results(
     current_path: str,
 ) -> dict[str, Any]:
     """Compare two compatible scan reports and classify their findings."""
-    baseline = load_results(baseline_path)
-    current = load_results(current_path)
+    return compare_result_documents(
+        load_results(baseline_path),
+        load_results(current_path),
+    )
+
+
+def compare_result_documents(
+    baseline_result: dict[str, Any],
+    current_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare two validated scan results already held in memory."""
+    baseline = validate_results(baseline_result)
+    current = validate_results(current_result)
     _validate_comparison_report(baseline)
     _validate_comparison_report(current)
 
