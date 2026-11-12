@@ -117,15 +117,36 @@ def authorization_eligibility(
     return True, "authorized"
 
 
+def _is_dns_name_type(asset_type: str) -> bool:
+    return asset_type in {"domain", "subdomain", "hostname"}
+
+
+def _is_same_or_descendant(candidate: str, parent: str) -> bool:
+    candidate_labels = candidate.split(".")
+    parent_labels = parent.split(".")
+    return (
+        len(candidate_labels) >= len(parent_labels)
+        and candidate_labels[-len(parent_labels) :] == parent_labels
+    )
+
+
+def _is_strict_descendant(candidate: str, parent: str) -> bool:
+    return candidate != parent and _is_same_or_descendant(candidate, parent)
+
+
 def _asset_matches_target(asset: dict[str, Any], target: dict[str, str]) -> bool:
     value = asset["canonical_value"]
     target_value = target["canonical_value"]
     asset_type = asset["asset_type"]
     target_type = target["asset_type"]
-    if asset_type in {"domain", "subdomain", "hostname"}:
-        if target_type not in {"domain", "subdomain", "hostname"}:
+    if _is_dns_name_type(asset_type):
+        if not _is_dns_name_type(target_type):
             return False
-        return target_value == value or target_value.endswith(f".{value}")
+        if asset_type == "hostname":
+            return target_value == value
+        # A domain or subdomain entry covers itself and names beneath its DNS
+        # label boundary. A hostname entry, by contrast, is always exact-only.
+        return _is_same_or_descendant(target_value, value)
 
     if asset_type in {"ipv4", "ipv6"}:
         return target_type == asset_type and target_value == value
@@ -157,14 +178,15 @@ def _exclusion_overlaps_target(
         return True
     asset_type = asset["asset_type"]
     target_type = target["asset_type"]
-    if asset_type in {"domain", "subdomain", "hostname"} and target_type in {
-        "domain",
-        "subdomain",
-        "hostname",
-    }:
+    if _is_dns_name_type(asset_type) and _is_dns_name_type(target_type):
         asset_value = asset["canonical_value"]
         target_value = target["canonical_value"]
-        return asset_value.endswith(f".{target_value}")
+        # A broader domain/subdomain target overlaps a narrower exclusion;
+        # reject the proposed parent instead of bypassing that exclusion.
+        return target_type in {"domain", "subdomain"} and _is_strict_descendant(
+            asset_value,
+            target_value,
+        )
     if asset_type in {"ipv4_cidr", "ipv6_cidr"} and target_type in {
         "ipv4_cidr",
         "ipv6_cidr",

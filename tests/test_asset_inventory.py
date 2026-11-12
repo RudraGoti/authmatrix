@@ -21,6 +21,22 @@ def _create_asset(client, name, asset_type, value, **extra):
     )
 
 
+def _authorized_asset(asset_id, asset_type, value, **overrides):
+    return {
+        "asset_id": asset_id,
+        "name": asset_id,
+        "asset_type": asset_type,
+        "canonical_value": value,
+        "authorization_status": "authorized",
+        "authorization_confirmed": True,
+        "authorization_reference": f"AUTH-{asset_id}",
+        "authorization_starts_at": None,
+        "authorization_expires_at": None,
+        "active": True,
+        **overrides,
+    }
+
+
 def test_asset_value_canonicalization():
     cases = [
         ("domain", "EXAMPLE.COM", "example.com"),
@@ -163,6 +179,152 @@ def test_scope_parent_child_exclusions_and_network_overlap():
         "192.0.2.0/25",
     )
     assert broad_target["reason"] == "explicitly_excluded"
+
+
+def test_hostname_inclusion_is_exact_and_domain_matching_uses_label_boundaries():
+    assets = [
+        _authorized_asset("hostname", "hostname", "api.example.com"),
+        _authorized_asset("domain", "domain", "example.com"),
+    ]
+    entries = [
+        {"asset_id": "hostname", "direction": "include"},
+        {"asset_id": "domain", "direction": "include"},
+    ]
+
+    exact_hostname = evaluate_target(
+        assets,
+        entries[:1],
+        "hostname",
+        "API.EXAMPLE.COM.",
+    )
+    descendant_hostname = evaluate_target(
+        assets,
+        entries[:1],
+        "hostname",
+        "admin.api.example.com",
+    )
+    similar_prefix_hostname = evaluate_target(
+        assets,
+        entries[:1],
+        "hostname",
+        "evilapi.example.com",
+    )
+    assert exact_hostname["eligible"] is True
+    assert descendant_hostname["eligible"] is False
+    assert similar_prefix_hostname["eligible"] is False
+
+    assert evaluate_target(
+        assets,
+        entries[1:],
+        "hostname",
+        "example.com",
+    )["eligible"]
+    assert evaluate_target(
+        assets,
+        entries[1:],
+        "hostname",
+        "api.example.com",
+    )["eligible"]
+    assert not evaluate_target(
+        assets,
+        entries[1:],
+        "hostname",
+        "notexample.com",
+    )["eligible"]
+    assert not evaluate_target(
+        assets,
+        entries[1:],
+        "hostname",
+        "example.com.attacker.test",
+    )["eligible"]
+
+
+def test_subdomain_inclusion_covers_only_its_label_bounded_subtree():
+    assets = [_authorized_asset("subdomain", "subdomain", "team.example.com")]
+    entries = [{"asset_id": "subdomain", "direction": "include"}]
+
+    assert evaluate_target(
+        assets,
+        entries,
+        "hostname",
+        "team.example.com",
+    )["eligible"]
+    assert evaluate_target(
+        assets,
+        entries,
+        "hostname",
+        "dev.team.example.com",
+    )["eligible"]
+    assert not evaluate_target(
+        assets,
+        entries,
+        "hostname",
+        "evilteam.example.com",
+    )["eligible"]
+    assert not evaluate_target(
+        assets,
+        entries,
+        "hostname",
+        "team.example.com.attacker.test",
+    )["eligible"]
+
+
+def test_dns_exclusions_override_matching_inclusions_and_parent_targets():
+    assets = [
+        _authorized_asset("domain", "domain", "example.com"),
+        _authorized_asset("excluded-host", "hostname", "api.example.com"),
+    ]
+    entries = [
+        {"asset_id": "domain", "direction": "include"},
+        {"asset_id": "excluded-host", "direction": "exclude"},
+    ]
+
+    assert evaluate_target(
+        assets,
+        entries,
+        "hostname",
+        "api.example.com",
+    )["reason"] == "explicitly_excluded"
+    assert evaluate_target(
+        assets,
+        entries,
+        "domain",
+        "example.com",
+    )["reason"] == "explicitly_excluded"
+    assert evaluate_target(
+        assets,
+        entries,
+        "hostname",
+        "other.example.com",
+    )["eligible"]
+
+
+def test_ineligible_assets_never_match_hierarchical_domain_scope():
+    assets = [
+        _authorized_asset("pending", "domain", "pending.example.com",
+                          authorization_status="pending"),
+        _authorized_asset("revoked", "domain", "revoked.example.com",
+                          authorization_status="revoked"),
+        _authorized_asset("expired", "domain", "expired.example.com",
+                          authorization_expires_at="2000-01-01"),
+        _authorized_asset("inactive", "domain", "inactive.example.com",
+                          active=False),
+        _authorized_asset("unverified", "domain", "unverified.example.com",
+                          authorization_confirmed=False),
+    ]
+    entries = [
+        {"asset_id": asset["asset_id"], "direction": "include"} for asset in assets
+    ]
+
+    for asset in assets:
+        result = evaluate_target(
+            assets,
+            entries,
+            "hostname",
+            f"api.{asset['canonical_value']}",
+        )
+        assert result["eligible"] is False
+        assert result["reason"] == "authorization_ineligible"
 
 
 def test_scope_uses_literal_hosts_and_ipv6_network_containment():

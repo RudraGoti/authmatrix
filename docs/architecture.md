@@ -35,6 +35,10 @@ scanner/application stages plus the asset inventory foundation:
    entries in that same protected SQLite database. A shared backend evaluator
    enforces date, active-state, inclusion, and exclusion rules for preview and
    proposed-target validation. It performs no network or DNS requests.
+   DNS inclusion semantics are type-specific: `hostname` is exact-only, while a
+   `domain` covers itself and descendant hostnames and a `subdomain` represents its
+   own delegated subtree. Hierarchical checks compare canonical DNS label
+   sequences, so a textual suffix without a label boundary does not match.
 
 The current implementation intentionally permits targets only at literal loopback
 IP addresses (`127.0.0.1` or `::1`) listed in `scope.allowed_hosts`. It does not
