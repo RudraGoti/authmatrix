@@ -7,6 +7,7 @@ from authmatrix.openapi import parse_openapi
 from authmatrix.web.services import (
     configured_openapi_max_bytes,
     list_openapi_mapping_files,
+    list_policy_files,
     load_openapi_inventory,
     resolve_openapi_mapping_path,
     resolve_openapi_path,
@@ -55,6 +56,26 @@ def test_rejects_symlink_escape(tmp_path: Path):
 
     with pytest.raises(ConfigurationError):
         resolve_policy_path("outside.yaml", policy_dir)
+
+
+def test_rejects_internal_policy_symlink_and_excludes_it_from_listing(
+    config_path: Path,
+    tmp_path: Path,
+) -> None:
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    target = policy_dir / "target.yaml"
+    target.write_bytes(config_path.read_bytes())
+    alias = policy_dir / "alias.yaml"
+    try:
+        alias.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is not supported.")
+
+    with pytest.raises(ConfigurationError):
+        resolve_policy_path(alias.name, policy_dir)
+
+    assert list_policy_files(policy_dir) == ["target.yaml"]
 
 
 def test_openapi_spec_size_is_checked_before_bounded_read(
