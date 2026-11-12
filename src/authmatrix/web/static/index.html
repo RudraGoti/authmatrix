@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#0b1120">
+  <meta name="theme-color" content="#090909">
   <meta name="description" content="Local-first API authorization security testing dashboard.">
   <title>AuthMatrix | Security Dashboard</title>
   <link rel="icon" href="data:,">
@@ -11,51 +11,54 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <a class="brand" href="/" aria-label="AuthMatrix dashboard">
-        <span class="brand-mark">A</span>
+        <span class="brand-mark" aria-hidden="true">A</span>
         <span class="brand-name">AuthMatrix</span>
       </a>
 
       <div class="sidebar-label">WORKSPACE</div>
       <nav class="navigation" aria-label="Main navigation">
-        <a class="nav-link active" href="#dashboard" data-page="dashboard">
-          <span class="nav-icon">▦</span> Dashboard
+        <a class="nav-link active" href="#dashboard" data-page="dashboard" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">D</span> Dashboard
         </a>
         <a class="nav-link" href="#new-scan" data-page="new-scan">
-          <span class="nav-icon">＋</span> New Scan
+          <span class="nav-icon" aria-hidden="true">+</span> New Scan
         </a>
         <a class="nav-link" href="#policies" data-page="policies">
-          <span class="nav-icon">◇</span> Policies
+          <span class="nav-icon" aria-hidden="true">P</span> Policies
         </a>
         <a class="nav-link" href="#openapi" data-page="openapi">
-          <span class="nav-icon">⌘</span> OpenAPI
+          <span class="nav-icon" aria-hidden="true">O</span> OpenAPI
         </a>
 
         <div class="sidebar-label section-label">ANALYSIS</div>
         <a class="nav-link" href="#findings" data-page="findings">
-          <span class="nav-icon">⚑</span> Findings
+          <span class="nav-icon" aria-hidden="true">!</span> Findings
         </a>
         <a class="nav-link" href="#reports" data-page="reports">
-          <span class="nav-icon">▤</span> Reports
+          <span class="nav-icon" aria-hidden="true">R</span> Reports
         </a>
         <a class="nav-link" href="#history" data-page="history">
-          <span class="nav-icon">◷</span> History
+          <span class="nav-icon" aria-hidden="true">H</span> History
         </a>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="local-badge"><span class="local-dot"></span> Local workspace</div>
+        <div class="local-badge"><span class="local-dot" aria-hidden="true"></span> Local workspace</div>
         <p>AuthMatrix <span id="app-version">v0.1.0</span></p>
       </div>
     </aside>
 
-    <main class="main-content">
+    <main class="main-content" id="main-content" tabindex="-1">
       <header class="topbar">
         <div class="topbar-left">
           <button class="menu-button" id="menu-toggle" aria-label="Toggle navigation"
-                  aria-expanded="false">☰</button>
+                  aria-controls="sidebar" aria-expanded="false">
+            <span class="menu-icon" aria-hidden="true"></span>
+          </button>
           <div>
             <div class="breadcrumb">Workspace <span>/</span> <strong id="page-name">Dashboard</strong></div>
             <p class="topbar-subtitle">API authorization security testing</p>
@@ -64,7 +67,7 @@
 
         <div class="connection-status" id="connection-status" role="status"
              aria-live="polite">
-          <span class="status-dot"></span>
+          <span class="status-dot" aria-hidden="true"></span>
           <span id="connection-label">Checking API...</span>
         </div>
       </header>
@@ -76,11 +79,11 @@
             <h1>Dashboard</h1>
             <p class="muted">Monitor your authorization testing workspace.</p>
           </div>
-          <a class="primary-button" href="#new-scan" data-page="new-scan">＋ New scan</a>
+          <a class="primary-button" href="#new-scan" data-page="new-scan">+ New scan</a>
         </div>
 
         <div class="notice" id="api-notice" role="status" aria-live="polite">
-          <span class="notice-indicator"></span>
+          <span class="notice-indicator" aria-hidden="true"></span>
           <div>
             <strong id="api-notice-title">Connecting to local API</strong>
             <p id="api-notice-message">Checking whether the AuthMatrix backend is available.</p>
@@ -92,27 +95,27 @@
             <h2>Workspace overview</h2>
             <p class="muted">Live backend information</p>
           </div>
-          <span class="live-label"><span></span> LIVE STATUS</span>
+          <span class="live-label"><span aria-hidden="true"></span> LIVE STATUS</span>
         </div>
 
         <div class="stats-grid">
           <article class="stat-card">
-            <div class="stat-top"><span>Total scans</span><span class="stat-icon">◷</span></div>
+            <div class="stat-top"><span>Total scans</span><span class="stat-icon" aria-hidden="true">#</span></div>
             <div class="stat-value" id="total-scans-stat">—</div>
             <p class="stat-foot">Retained scan history</p>
           </article>
           <article class="stat-card">
-            <div class="stat-top"><span>Completed</span><span class="stat-icon">✓</span></div>
+            <div class="stat-top"><span>Completed</span><span class="stat-icon" aria-hidden="true">+</span></div>
             <div class="stat-value" id="completed-scans-stat">—</div>
             <p class="stat-foot">Completed policy scans</p>
           </article>
           <article class="stat-card">
-            <div class="stat-top"><span>Failed</span><span class="stat-icon">!</span></div>
+            <div class="stat-top"><span>Failed</span><span class="stat-icon" aria-hidden="true">!</span></div>
             <div class="stat-value" id="failed-scans-stat">—</div>
             <p class="stat-foot">Scans not completed</p>
           </article>
           <article class="stat-card">
-            <div class="stat-top"><span>Findings</span><span class="stat-icon">⚑</span></div>
+            <div class="stat-top"><span>Findings</span><span class="stat-icon" aria-hidden="true">*</span></div>
             <div class="stat-value" id="findings-stat">—</div>
             <p class="stat-foot">From retained completed scans</p>
           </article>
@@ -125,19 +128,19 @@
             </div>
             <div class="action-list">
               <a class="action-item" href="#new-scan" data-page="new-scan">
-                <span class="action-icon">＋</span>
+                <span class="action-icon" aria-hidden="true">+</span>
                 <span><strong>Start a new scan</strong><small>Configure an authorization test</small></span>
-                <span class="action-arrow">→</span>
+                <span class="action-arrow" aria-hidden="true">&gt;</span>
               </a>
               <a class="action-item" href="#policies" data-page="policies">
-                <span class="action-icon">◇</span>
+                <span class="action-icon" aria-hidden="true">P</span>
                 <span><strong>Review policies</strong><small>Inspect your configured test policies</small></span>
-                <span class="action-arrow">→</span>
+                <span class="action-arrow" aria-hidden="true">&gt;</span>
               </a>
               <a class="action-item" href="#openapi" data-page="openapi">
-                <span class="action-icon">⌘</span>
+                <span class="action-icon" aria-hidden="true">O</span>
                 <span><strong>OpenAPI inventory</strong><small>Prepare API operation coverage</small></span>
-                <span class="action-arrow">→</span>
+                <span class="action-arrow" aria-hidden="true">&gt;</span>
               </a>
             </div>
           </section>
@@ -151,14 +154,14 @@
             <div class="system-row"><span>Status endpoint</span><code>/api/status</code></div>
             <div class="system-row"><span>Version</span><strong id="version-stat">—</strong></div>
             <div class="system-row"><span>Capabilities</span><strong id="capability-stat">—</strong></div>
-            <button class="text-button" id="refresh-status">↻ Refresh connection</button>
+            <button class="text-button" id="refresh-status">Refresh connection</button>
           </section>
         </div>
 
         <section class="panel activity-panel">
           <div class="panel-heading">
             <div><h2>Recent activity</h2><p class="muted">Persisted scan activity</p></div>
-            <a class="text-button" href="#history" data-page="history">View history →</a>
+            <a class="text-button" href="#history" data-page="history">View history</a>
           </div>
           <div id="recent-activity" class="activity-list" role="list"
                aria-live="polite" aria-busy="true">
@@ -220,7 +223,7 @@
 
             <div class="scan-actions">
               <button class="primary-button" id="start-scan" type="submit" disabled>Start authorization scan</button>
-              <button class="secondary-button" id="reload-policies" type="button">↻ Reload policies</button>
+              <button class="secondary-button" id="reload-policies" type="button">Reload policies</button>
             </div>
           </form>
 
@@ -245,7 +248,7 @@
             <h1 id="workspace-title">Workspace</h1>
             <p class="muted" id="workspace-description"></p>
           </div>
-          <button class="secondary-button" id="refresh-workspace" type="button">↻ Refresh</button>
+          <button class="secondary-button" id="refresh-workspace" type="button">Refresh</button>
         </div>
         <div id="workspace-message" class="scan-message" role="status" aria-live="polite" hidden></div>
         <div id="workspace-content" class="workspace-content"></div>
