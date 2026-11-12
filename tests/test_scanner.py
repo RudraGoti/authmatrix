@@ -297,8 +297,34 @@ def test_basic_auth_missing_credentials_are_reported(monkeypatch) -> None:
         ),
     )
 
-    with pytest.raises(ScanError, match="Missing basic-auth environment variables"):
+    with pytest.raises(
+        ScanError,
+        match="Missing basic-auth environment variable\\(s\\) "
+        "TEST_BASIC_USER, TEST_BASIC_PASSWORD",
+    ):
         _auth_for(identity)
+
+
+def test_missing_bearer_auth_reports_variable_name_without_value(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("TEST_BEARER_TOKEN", raising=False)
+    identity = Identity(
+        name="tester",
+        role="user",
+        auth=AuthConfig(kind="bearer", token_env="TEST_BEARER_TOKEN"),
+    )
+
+    with pytest.raises(ScanError) as error:
+        _auth_for(identity)
+
+    assert str(error.value) == (
+        "Missing authentication environment variable TEST_BEARER_TOKEN "
+        "for identity tester."
+    )
+    assert error.value.public_detail == str(error.value)
+    assert "test-only-bearer-token" not in str(error.value)
+
 
 def test_request_limit_is_checked_before_network(
     config_path: Path,

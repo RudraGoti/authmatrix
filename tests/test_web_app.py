@@ -199,6 +199,45 @@ def test_gui_scan_runs_existing_engine_and_exposes_final_result(
     assert client.get(f"/api/scans/{scan_id}/report.json").json() == result
 
 
+def test_gui_openapi_scan_resolves_configured_credentials(
+    tmp_path,
+    config_path,
+    demo_server,
+    auth_env,
+):
+    from pathlib import Path
+
+    from authmatrix.web.app import create_app
+
+    policy_text = config_path.read_text(encoding="utf-8").replace(
+        "http://127.0.0.1:8000",
+        f"http://127.0.0.1:{demo_server}",
+    )
+    (tmp_path / "policy.yaml").write_text(policy_text, encoding="utf-8")
+    client = TestClient(
+        create_app(
+            policy_dir=tmp_path,
+            openapi_dir=Path(__file__).resolve().parents[1] / "examples",
+        )
+    )
+
+    response = client.post(
+        "/api/scans",
+        json={
+            "policy_path": "policy.yaml",
+            "authorization_confirmed": True,
+            "openapi_spec": "openapi.yaml",
+            "values_mapping": "openapi.mapping.yaml",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["summary"]["requests"] == 9
+    assert result["summary"]["findings"] == 4
+    assert result["summary"]["skipped"] == 0
+
+
 def test_out_of_scope_policy_is_rejected_before_http_client_creation(
     tmp_path,
     config_path,
@@ -447,10 +486,11 @@ def test_scan_returns_sanitized_missing_credentials_error(monkeypatch):
     assert response.json() == {
         "error": "scan_error",
         "detail": (
-            "A required authentication credential is not configured "
-            "in the server environment."
+            "Missing authentication environment variable "
+            "AUTHMATRIX_ALICE_TOKEN for identity alice."
         ),
     }
+    assert "alice-local-token" not in response.text
 
 
 def test_scan_returns_sanitized_target_unavailable_error(monkeypatch):

@@ -45,46 +45,40 @@ def _request_count(config: ScanConfig) -> int:
     return count
 
 
-def _auth_for_with_placeholder(
-    identity: Identity,
-) -> tuple[dict[str, str], httpx.BasicAuth | None]:
+def _auth_for(identity: Identity) -> tuple[dict[str, str], httpx.BasicAuth | None]:
     if identity.auth.kind == "bearer":
-        token = os.environ.get(identity.auth.token_env or "")
+        token_env = identity.auth.token_env or ""
+        token = os.environ.get(token_env)
         if not token:
+            message = (
+                "Missing authentication environment variable "
+                f"{token_env or '<unset>'} for identity {identity.name}."
+            )
             raise ScanError(
-                "Missing authentication environment variable for identity "
-                f"{identity.name}.",
-                public_detail=(
-                    "A required authentication credential is not configured "
-                    "in the server environment."
-                ),
+                message,
+                public_detail=message,
             )
         return {"Authorization": f"Bearer {token}"}, None
 
-    username = os.environ.get(identity.auth.username_env or "")
-    password = os.environ.get(identity.auth.password_env or "")
+    username_env = identity.auth.username_env or ""
+    password_env = identity.auth.password_env or ""
+    username = os.environ.get(username_env)
+    password = os.environ.get(password_env)
     if not username or not password:
-        raise ScanError(
-            f"Missing basic-auth environment variables for identity {identity.name}."
-        )
-    return {}, httpx.BasicAuth(username, password)
-
-
-def _auth_for(identity: Identity) -> tuple[dict[str, str], httpx.BasicAuth | None]:
-    headers, basic_auth = _auth_for_with_placeholder(identity)
-    if identity.auth.kind == "bearer":
-        token = os.environ.get(identity.auth.token_env or "")
-        if not token:
-            raise ScanError(
-                "Missing authentication environment variable for identity "
-                f"{identity.name}.",
-                public_detail=(
-                    "A required authentication credential is not configured "
-                    "in the server environment."
-                ),
+        missing = [
+            name
+            for name, value in (
+                (username_env, username),
+                (password_env, password),
             )
-        headers["Authorization"] = f"Bearer {token}"
-    return headers, basic_auth
+            if not value
+        ]
+        message = (
+            "Missing basic-auth environment variable(s) "
+            f"{', '.join(missing)} for identity {identity.name}."
+        )
+        raise ScanError(message, public_detail=message)
+    return {}, httpx.BasicAuth(username, password)
 
 
 def _route(operation: Operation, resource_id: str | None) -> str:

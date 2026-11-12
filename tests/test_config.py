@@ -13,6 +13,14 @@ def test_example_policy_loads(config_path: Path) -> None:
     assert len(config.identities) == 3
     assert len(config.resources["items"].ids) == 2
     assert len(config.operations) == 2
+    assert {
+        name: identity.auth.token_env
+        for name, identity in config.identities.items()
+    } == {
+        "alice": "AUTHMATRIX_ALICE_TOKEN",
+        "bob": "AUTHMATRIX_BOB_TOKEN",
+        "admin": "AUTHMATRIX_ADMIN_TOKEN",
+    }
 
 
 @pytest.mark.parametrize(

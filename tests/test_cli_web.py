@@ -94,3 +94,54 @@ def test_test_command_requires_openapi_values_mapping():
 
     assert result.exit_code == 2
     assert "--openapi and --values must be provided together" in result.output
+
+
+def test_test_command_reports_missing_auth_environment_variable(
+    tmp_path,
+    monkeypatch,
+):
+    from authmatrix import scanner
+
+    for name in (
+        "AUTHMATRIX_ALICE_TOKEN",
+        "AUTHMATRIX_BOB_TOKEN",
+        "AUTHMATRIX_ADMIN_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    requests = []
+
+    class Client:
+        def __init__(self, **_options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_options):
+            requests.append(True)
+            raise AssertionError("Missing credentials must stop before requests.")
+
+    monkeypatch.setattr(scanner.httpx, "Client", Client)
+    result = CliRunner().invoke(
+        app,
+        [
+            "test",
+            "--config",
+            str(ROOT / "examples" / "policy.yaml"),
+            "--openapi",
+            str(ROOT / "examples" / "openapi.yaml"),
+            "--values",
+            str(ROOT / "examples" / "openapi.mapping.yaml"),
+            "--output",
+            str(tmp_path / "results.json"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "AUTHMATRIX_ALICE_TOKEN" in result.output
+    assert "alice-local-token" not in result.output
+    assert requests == []
