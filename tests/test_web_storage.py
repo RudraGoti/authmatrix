@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from authmatrix.web.storage import ScanStore
@@ -109,3 +111,73 @@ def test_running_scan_is_marked_failed_after_restart(tmp_path):
         "findings": 0,
         "failed": 1,
     }
+
+
+def _insert_authorized_asset(store, asset_id="host"):
+    store.create_asset(
+        {
+            "asset_id": asset_id,
+            "name": asset_id,
+            "asset_type": "hostname",
+            "canonical_value": f"{asset_id}.example.com",
+            "description": "",
+            "tags": [],
+            "organization": "Local workspace",
+            "authorization_status": "authorized",
+            "authorization_confirmed": True,
+            "authorization_reference": "AUTH-1",
+            "authorization_starts_at": None,
+            "authorization_expires_at": None,
+            "created_at": "2026-11-12T00:00:00+00:00",
+            "updated_at": "2026-11-12T00:00:00+00:00",
+        }
+    )
+
+
+def test_authorization_snapshot_reads_assets_and_scope_consistently(tmp_path):
+    store = ScanStore(tmp_path / "scans.sqlite3")
+    _insert_authorized_asset(store)
+    store.set_scope_entry("host", "include", "2026-11-12T00:00:00+00:00")
+
+    assets, entries = store.authorization_snapshot()
+
+    assert [asset["canonical_value"] for asset in assets] == ["host.example.com"]
+    assert entries == [
+        {
+            "asset_id": "host",
+            "direction": "include",
+            "created_at": "2026-11-12T00:00:00+00:00",
+        }
+    ]
+
+
+def test_authorization_transaction_holds_sqlite_writer_reservation(tmp_path):
+    store = ScanStore(tmp_path / "scans.sqlite3")
+    _insert_authorized_asset(store)
+    with store.locked_authorization_snapshot(timeout=0.1) as (assets, _entries):
+        assert assets[0]["authorization_status"] == "authorized"
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with store._connect(timeout=0.05) as connection:
+                connection.execute(
+                    "UPDATE assets SET authorization_status = 'revoked' "
+                    "WHERE asset_id = 'host'"
+                )
+
+
+def test_authorization_transaction_fails_on_writer_lock_timeout(tmp_path):
+    store = ScanStore(tmp_path / "scans.sqlite3")
+    _insert_authorized_asset(store)
+    with store._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with store.locked_authorization_snapshot(timeout=0.05):
+                pytest.fail("The authorization transaction should not be acquired.")
+
+
+def test_authorization_snapshot_rejects_malformed_stored_tags(tmp_path):
+    store = ScanStore(tmp_path / "scans.sqlite3")
+    _insert_authorized_asset(store)
+    with store._connect() as connection:
+        connection.execute("UPDATE assets SET tags_json = '{' WHERE asset_id = 'host'")
+    with pytest.raises(ValueError):
+        store.authorization_snapshot()

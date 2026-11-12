@@ -10,8 +10,11 @@ import stat
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
+
+from authmatrix.web.asset_inventory import ASSET_TYPES, canonicalize_asset_value
 
 
 class ScanStore:
@@ -157,7 +160,9 @@ class ScanStore:
         return descriptor
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, timeout: float = 5.0) -> Iterator[sqlite3.Connection]:
+        if not 0 < timeout <= 5:
+            raise ValueError("Database timeout must be greater than 0 and at most 5.")
         directory_fd = self._open_directory()
         database_fd = None
         connection = None
@@ -187,7 +192,7 @@ class ScanStore:
                 if Path("/proc/self/fd").is_dir()
                 else str(self.path)
             )
-            connection = sqlite3.connect(database_path, timeout=5)
+            connection = sqlite3.connect(database_path, timeout=timeout)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             current_info = os.stat(
@@ -474,6 +479,77 @@ class ScanStore:
                 "ORDER BY direction, created_at, asset_id"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _authorization_snapshot(
+        connection: sqlite3.Connection,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        asset_rows = connection.execute(
+            "SELECT * FROM assets ORDER BY name COLLATE NOCASE, asset_id LIMIT ?",
+            (ScanStore.max_assets,),
+        ).fetchall()
+        if len(asset_rows) >= ScanStore.max_assets:
+            count = connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            if count > ScanStore.max_assets:
+                raise ValueError("Stored asset inventory exceeds its configured limit.")
+        assets = [ScanStore._asset_from_row(row) for row in asset_rows]
+        if any(asset is None for asset in assets):
+            raise ValueError("Stored asset inventory contains an invalid record.")
+        by_id = {asset["asset_id"]: asset for asset in assets}
+        if len(by_id) != len(assets):
+            raise ValueError("Stored asset inventory contains duplicate IDs.")
+
+        for asset in assets:
+            if (
+                asset["asset_type"] not in ASSET_TYPES
+                or canonicalize_asset_value(
+                    asset["asset_type"], asset["canonical_value"]
+                )
+                != asset["canonical_value"]
+                or asset["authorization_status"]
+                not in {"pending", "authorized", "unverified", "revoked"}
+                or not isinstance(asset["tags"], list)
+                or any(not isinstance(tag, str) for tag in asset["tags"])
+            ):
+                raise ValueError("Stored asset inventory contains malformed data.")
+            for field in ("authorization_starts_at", "authorization_expires_at"):
+                value = asset[field]
+                if value is not None and date.fromisoformat(value).isoformat() != value:
+                    raise ValueError("Stored authorization date is not canonical.")
+
+        entry_rows = connection.execute(
+            "SELECT asset_id, direction, created_at FROM scope_entries "
+            "ORDER BY direction, created_at, asset_id"
+        ).fetchall()
+        entries = [dict(row) for row in entry_rows]
+        if any(
+            entry["asset_id"] not in by_id
+            or entry["direction"] not in {"include", "exclude"}
+            for entry in entries
+        ):
+            raise ValueError("Stored scope contains an inconsistent entry.")
+        if len({entry["asset_id"] for entry in entries}) != len(entries):
+            raise ValueError("Stored scope contains duplicate entries.")
+        return assets, entries
+
+    def authorization_snapshot(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read assets and scope entries from one consistent SQLite snapshot."""
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            return self._authorization_snapshot(connection)
+
+    @contextmanager
+    def locked_authorization_snapshot(
+        self,
+        *,
+        timeout: float = 5.0,
+    ) -> Iterator[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+        """Hold SQLite's writer reservation while a gated request is issued."""
+        with self._connect(timeout=timeout) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            yield self._authorization_snapshot(connection)
 
     def start(
         self,

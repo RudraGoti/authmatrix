@@ -5,6 +5,7 @@ const API = {
   status: "/api/status",
   policies: "/api/policies",
   scans: "/api/scans",
+  inventoryScans: "/api/scans/inventory",
   findings: "/api/findings",
   comparisons: "/api/comparisons",
   assets: "/api/assets",
@@ -62,6 +63,9 @@ const elements = {
   appVersion: document.querySelector("#app-version"),
   refreshButton: document.querySelector("#refresh-status"),
   scanForm: document.querySelector("#scan-form"),
+  scanMode: document.querySelector("#scan-mode"),
+  inventoryTargetControl: document.querySelector("#inventory-target-control"),
+  inventoryTarget: document.querySelector("#inventory-target"),
   policySelect: document.querySelector("#policy-select"),
   openapiSelect: document.querySelector("#openapi-select"),
   valuesSelect: document.querySelector("#values-select"),
@@ -78,6 +82,8 @@ const elements = {
 
 let policiesLoaded = false;
 let openapiOptionsLoaded = false;
+let inventoryExecutionEnabled = false;
+let inventoryAssetsLoaded = false;
 let scanRunning = false;
 let activePage = "dashboard";
 let scanPollTimer = null;
@@ -96,6 +102,9 @@ function navigate(page) {
     "policies", "assets", "scope", "openapi", "findings", "reports", "history",
   ].includes(selectedPage);
 
+  if (!isNewScan) {
+    inventoryAssetsLoaded = false;
+  }
   elements.dashboardPage.hidden = !isDashboard;
   elements.newScanPage.hidden = !isNewScan;
   elements.workspacePage.hidden = !isWorkspacePage;
@@ -125,6 +134,14 @@ function navigate(page) {
   }
   if (isNewScan && !openapiOptionsLoaded) {
     loadOpenAPIOptions();
+  }
+  if (
+    isNewScan &&
+    inventoryExecutionEnabled &&
+    elements.scanMode.value === "inventory" &&
+    !inventoryAssetsLoaded
+  ) {
+    loadInventoryAssets();
   }
 }
 
@@ -207,6 +224,16 @@ async function refreshApiStatus(showChecking = false) {
     const capabilities = Array.isArray(status.capabilities)
       ? status.capabilities
       : [];
+    inventoryExecutionEnabled =
+      capabilities.includes("inventory_scoped_gui_execution");
+    const inventoryMode = elements.scanMode.querySelector(
+      'option[value="inventory"]',
+    );
+    inventoryMode.hidden = !inventoryExecutionEnabled;
+    if (!inventoryExecutionEnabled && elements.scanMode.value === "inventory") {
+      elements.scanMode.value = "loopback";
+    }
+    updateInventoryTargetControl();
 
     elements.versionStat.textContent = version;
     elements.appVersion.textContent = `v${version}`;
@@ -1290,6 +1317,67 @@ async function loadPolicies() {
   }
 }
 
+function updateInventoryTargetControl() {
+  const selected = inventoryExecutionEnabled &&
+    elements.scanMode.value === "inventory";
+  elements.inventoryTargetControl.hidden = !selected;
+  elements.inventoryTarget.required = selected;
+}
+
+async function loadInventoryAssets() {
+  elements.inventoryTarget.replaceChildren();
+  const loading = document.createElement("option");
+  loading.value = "";
+  loading.textContent = "Loading authorized assets...";
+  elements.inventoryTarget.append(loading);
+  elements.inventoryTarget.disabled = true;
+  updateStartButton();
+
+  try {
+    const assets = [];
+    for (let offset = 0; offset < 5000; offset += 100) {
+      const page = await fetchJson(`${API.assets}?limit=100&offset=${offset}`);
+      const batch = Array.isArray(page.assets) ? page.assets : [];
+      assets.push(...batch);
+      if (batch.length < 100 || assets.length >= page.summary.total) {
+        break;
+      }
+    }
+    elements.inventoryTarget.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = assets.length
+      ? "Select an authorized target asset"
+      : "No authorized target assets available";
+    elements.inventoryTarget.append(placeholder);
+    assets
+      .filter((asset) =>
+        ["domain", "subdomain", "hostname", "ipv4", "ipv6"].includes(asset.asset_type) &&
+        asset.authorization_status === "authorized" &&
+        asset.active === true &&
+        asset.scope_eligible === true
+      )
+      .forEach((asset) => {
+        const option = document.createElement("option");
+        option.value = asset.asset_id;
+        option.textContent = `${asset.name} · ${asset.asset_type} · ${asset.canonical_value}`;
+        elements.inventoryTarget.append(option);
+      });
+    inventoryAssetsLoaded = true;
+    elements.inventoryTarget.disabled = elements.inventoryTarget.options.length <= 1;
+    updateStartButton();
+  } catch (error) {
+    elements.inventoryTarget.replaceChildren();
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Unable to load authorized assets";
+    elements.inventoryTarget.append(option);
+    inventoryAssetsLoaded = false;
+    updateStartButton();
+    showScanMessage(`Could not load inventory assets: ${error.message}`, "error");
+  }
+}
+
 async function loadOpenAPIOptions() {
   try {
     const [specData, mappingData] = await Promise.all([
@@ -1364,8 +1452,14 @@ async function loadPolicyReview() {
       (count, resource) => count + resource.count,
       0,
     );
+    const targetLine = elements.scanMode.value === "inventory"
+      ? `Inventory target: ${elements.inventoryTarget.selectedOptions[0]?.textContent || "not selected"}`
+      : `Target: ${details.target}`;
     elements.policyReview.textContent = [
-      `Target: ${details.target}`,
+      targetLine,
+      ...(elements.scanMode.value === "inventory"
+        ? [`Loopback policy template target: ${details.target}`]
+        : []),
       `Policy authorization: ${details.authorized ? "authorized" : "not authorized"}`,
       `Authorized hosts: ${details.allowed_hosts.join(", ") || "none"}`,
       `Identities: ${details.identities.map((identity) => `${identity.name} (${identity.role})`).join(", ")}`,
@@ -1479,6 +1573,11 @@ async function startScan(event) {
     showScanMessage("Select a policy before starting a scan.", "error");
     return;
   }
+  const inventoryMode = elements.scanMode.value === "inventory";
+  if (inventoryMode && !elements.inventoryTarget.value) {
+    showScanMessage("Select an inventory asset before starting the scan.", "error");
+    return;
+  }
   if (Boolean(elements.openapiSelect.value) !== Boolean(elements.valuesSelect.value)) {
     showScanMessage(
       "Select both an OpenAPI document and a values mapping, or leave both blank.",
@@ -1497,6 +1596,8 @@ async function startScan(event) {
   elements.policySelect.disabled = true;
   elements.openapiSelect.disabled = true;
   elements.valuesSelect.disabled = true;
+  elements.scanMode.disabled = true;
+  elements.inventoryTarget.disabled = true;
   elements.authorizationConfirmed.disabled = true;
   elements.startScan.textContent = "Scan running...";
   elements.scanResults.hidden = true;
@@ -1507,19 +1608,23 @@ async function startScan(event) {
 
   scanPollTimer = window.setInterval(pollScanState, 1000);
   try {
-    const result = await fetchJson(API.scans, {
-      method: "POST",
-      body: JSON.stringify({
-        policy_path: policyPath,
-        authorization_confirmed: elements.authorizationConfirmed.checked,
-        ...(elements.openapiSelect.value
-          ? {
-              openapi_spec: elements.openapiSelect.value,
-              values_mapping: elements.valuesSelect.value,
-            }
-          : {}),
-      }),
-    });
+    const result = await fetchJson(
+      inventoryMode ? API.inventoryScans : API.scans,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          policy_path: policyPath,
+          authorization_confirmed: elements.authorizationConfirmed.checked,
+          ...(inventoryMode ? { asset_id: elements.inventoryTarget.value } : {}),
+          ...(elements.openapiSelect.value
+            ? {
+                openapi_spec: elements.openapiSelect.value,
+                values_mapping: elements.valuesSelect.value,
+              }
+            : {}),
+        }),
+      },
+    );
 
     renderScanResults(result);
     await refreshApiStatus();
@@ -1543,11 +1648,21 @@ async function startScan(event) {
     elements.authorizationConfirmed.disabled = false;
     elements.openapiSelect.disabled = false;
     elements.valuesSelect.disabled = false;
-    elements.startScan.disabled =
-      elements.policySelect.disabled ||
-      !elements.policySelect.value ||
-      !elements.authorizationConfirmed.checked;
+    elements.scanMode.disabled = false;
+    elements.inventoryTarget.disabled =
+      !inventoryAssetsLoaded || elements.inventoryTarget.options.length <= 1;
+    updateStartButton();
   }
+}
+
+function updateStartButton() {
+  elements.startScan.disabled =
+    scanRunning ||
+    elements.policySelect.disabled ||
+    !elements.policySelect.value ||
+    (elements.scanMode.value === "inventory" &&
+      (!inventoryExecutionEnabled || !elements.inventoryTarget.value)) ||
+    !elements.authorizationConfirmed.checked;
 }
 
 async function pollScanState() {
@@ -1587,6 +1702,24 @@ elements.refreshButton.addEventListener("click", () => refreshApiStatus(true));
 elements.workspaceRefresh.addEventListener("click", () => loadWorkspace());
 elements.scanForm.addEventListener("submit", startScan);
 elements.reloadPolicies.addEventListener("click", loadPolicies);
+elements.scanMode.addEventListener("change", () => {
+  elements.authorizationConfirmed.checked = false;
+  updateInventoryTargetControl();
+  elements.startScan.disabled = true;
+  loadPolicyReview();
+  if (
+    elements.scanMode.value === "inventory" &&
+    inventoryExecutionEnabled &&
+    !inventoryAssetsLoaded
+  ) {
+    loadInventoryAssets();
+  }
+});
+elements.inventoryTarget.addEventListener("change", () => {
+  elements.authorizationConfirmed.checked = false;
+  updateStartButton();
+  loadPolicyReview();
+});
 
 elements.policySelect.addEventListener("change", () => {
   elements.authorizationConfirmed.checked = false;
@@ -1605,10 +1738,7 @@ elements.policySelect.addEventListener("change", () => {
 });
 
 elements.authorizationConfirmed.addEventListener("change", () => {
-  elements.startScan.disabled =
-    scanRunning ||
-    !elements.policySelect.value ||
-    !elements.authorizationConfirmed.checked;
+  updateStartButton();
 });
 
 navigate(window.location.hash.slice(1) || "dashboard");

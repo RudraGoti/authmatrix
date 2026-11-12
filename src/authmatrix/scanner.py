@@ -329,6 +329,23 @@ def _request_url(config: ScanConfig, route: str) -> str:
     return url
 
 
+def _inventory_request_url(config: ScanConfig, route: str) -> str:
+    if not route.startswith("/") or "://" in route or route.startswith("//"):
+        raise ScopeError("Inventory scan path is not a relative target route.")
+    url = f"{config.base_url}{route}"
+    parsed = urlsplit(url)
+    base = urlsplit(config.base_url)
+    if (
+        parsed.scheme != base.scheme
+        or parsed.netloc != base.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ScopeError("Inventory scan path changed the authorized origin.")
+    return url
+
+
 def _parse_returned_object_ids(
     body: bytes,
     response_id_path: str = "id",
@@ -487,8 +504,33 @@ def _read_response_body(response: httpx.Response, max_bytes: int) -> bytes:
 
 
 def run_authorization_tests(config: ScanConfig) -> dict:
-    """Run bounded authorization checks against explicitly scoped targets."""
-    validate_scope(config.base_url, config.allowed_hosts)
+    """Run bounded checks against the existing explicitly scoped loopback target."""
+    return _run_authorization_tests(config)
+
+
+def run_inventory_authorization_tests(
+    config: ScanConfig,
+    transport: httpx.BaseTransport,
+) -> dict:
+    """Run the same explicit operation matrix through an inventory-gated transport."""
+    return _run_authorization_tests(
+        config,
+        transport=transport,
+        inventory_scoped=True,
+    )
+
+
+def _run_authorization_tests(
+    config: ScanConfig,
+    *,
+    transport: httpx.BaseTransport | None = None,
+    inventory_scoped: bool = False,
+) -> dict:
+    if inventory_scoped:
+        if transport is None:
+            raise ScopeError("Inventory execution requires its gated transport.")
+    else:
+        validate_scope(config.base_url, config.allowed_hosts)
 
     total = _request_count(config)
 
@@ -506,10 +548,22 @@ def run_authorization_tests(config: ScanConfig) -> dict:
     findings = []
     request_number = 0
 
+    client_options = (
+        {
+            "limits": httpx.Limits(
+                max_connections=1,
+                max_keepalive_connections=0,
+            ),
+            "transport": transport,
+        }
+        if inventory_scoped
+        else {}
+    )
     with httpx.Client(
         timeout=config.timeout_seconds,
         follow_redirects=False,
         trust_env=False,
+        **client_options,
     ) as client:
         for operation in config.operations:
             resource_ids = (
@@ -547,7 +601,11 @@ def run_authorization_tests(config: ScanConfig) -> dict:
                     route, query, operation_headers, request_body, has_body = (
                         _build_request(operation, identity_name, resource_id)
                     )
-                    url = _request_url(config, route)
+                    url = (
+                        _inventory_request_url(config, route)
+                        if inventory_scoped
+                        else _request_url(config, route)
+                    )
                     display_path = (
                         operation.path
                         if operation.request_parameters is not None

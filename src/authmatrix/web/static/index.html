@@ -207,6 +207,18 @@
           </div>
 
           <form id="scan-form">
+            <label for="scan-mode">Execution scope</label>
+            <select id="scan-mode" name="scan_mode">
+              <option value="loopback">Existing loopback-only scan</option>
+              <option value="inventory" hidden>Authorized inventory asset (server policy)</option>
+            </select>
+            <div id="inventory-target-control" hidden>
+              <label for="inventory-target">Authorized inventory asset</label>
+              <select id="inventory-target" name="asset_id">
+                <option value="">Loading authorized assets...</option>
+              </select>
+              <p class="muted">Protocol, port, resolver, and address policy are configured by the server. Only policy-defined paths are requested.</p>
+            </div>
             <label for="policy-select">Authorization policy</label>
             <select id="policy-select" name="policy_path" required>
               <option value="">Loading available policies...</option>
@@ -224,7 +236,7 @@
             <div class="policy-review" id="policy-review" role="status" hidden></div>
             <label class="authorization-confirmation" for="authorization-confirmed">
               <input id="authorization-confirmed" type="checkbox" required>
-              I confirm I am authorized to test the target defined in this policy.
+              I confirm I am authorized to test the selected target.
             </label>
 
             <div class="scan-actions">

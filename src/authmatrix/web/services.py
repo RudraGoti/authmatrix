@@ -2,17 +2,29 @@
 
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 from authmatrix.config import load_config
-from authmatrix.errors import ConfigurationError, OpenAPIError
+from authmatrix.errors import ConfigurationError, OpenAPIError, ScopeError
+from authmatrix.execution_scope import (
+    DnspythonResolver,
+    InventoryExecutionPolicy,
+    Resolver,
+)
 from authmatrix.openapi import (
     DEFAULT_MAX_OPENAPI_BYTES,
     parse_openapi,
     sanitize_openapi_inventory,
 )
 from authmatrix.openapi_scan import compile_openapi_operations
-from authmatrix.scanner import run_authorization_tests
+from authmatrix.scanner import (
+    run_authorization_tests,
+    run_inventory_authorization_tests,
+)
+from authmatrix.transport import InventoryScopedTransport
+from authmatrix.web.asset_inventory import authorization_eligibility
+from authmatrix.web.storage import ScanStore
 
 MAX_OPENAPI_BYTES_LIMIT = 16 * 1024 * 1024
 
@@ -104,6 +116,93 @@ def run_policy_scan(
             "policy operations are listed as skipped."
         )
     return results
+
+
+def run_inventory_policy_scan(
+    policy_path: str,
+    policy_dir: Path,
+    store: ScanStore,
+    asset_id: str,
+    execution_policy: InventoryExecutionPolicy,
+    openapi_path: str | None = None,
+    values_path: str | None = None,
+    openapi_dir: Path | None = None,
+    values_dir: Path | None = None,
+    max_openapi_bytes: int = DEFAULT_MAX_OPENAPI_BYTES,
+    resolver: Resolver | None = None,
+) -> dict:
+    """Run explicit policy operations against one currently authorized asset."""
+    if not execution_policy.enabled:
+        raise ScopeError("Inventory-scoped execution is disabled by server policy.")
+    assets, _entries = store.authorization_snapshot()
+    asset = next((item for item in assets if item["asset_id"] == asset_id), None)
+    if asset is None:
+        raise ScopeError("Selected inventory asset is unavailable.")
+    if asset["asset_type"] not in {
+        "domain",
+        "subdomain",
+        "hostname",
+        "ipv4",
+        "ipv6",
+    }:
+        raise ScopeError("Selected inventory asset is not an executable target.")
+    if not authorization_eligibility(asset)[0]:
+        raise ScopeError("Selected inventory asset is not currently authorized.")
+
+    host = asset["canonical_value"]
+    authority = f"[{host}]" if ":" in host else host
+    origin = f"{execution_policy.scheme}://{authority}:{execution_policy.port}"
+    config = load_config(resolve_policy_path(policy_path, policy_dir))
+    if (openapi_path is None) != (values_path is None):
+        raise ConfigurationError(
+            "An OpenAPI document and its explicit values mapping must be selected "
+            "together."
+        )
+    skipped_operations = []
+    if openapi_path is not None and values_path is not None:
+        specification_dir = openapi_dir or policy_dir
+        mapping_dir = values_dir or specification_dir
+        resolved_spec = resolve_openapi_path(openapi_path, specification_dir)
+        resolved_mapping = resolve_openapi_mapping_path(values_path, mapping_dir)
+        config, skipped_operations = compile_openapi_operations(
+            config,
+            resolved_spec,
+            resolved_mapping,
+            max_openapi_bytes=max_openapi_bytes,
+        )
+
+    transport = InventoryScopedTransport(
+        store,
+        resolver
+        or DnspythonResolver(
+            nameservers=execution_policy.dns_nameservers,
+            timeout_seconds=execution_policy.dns_timeout_seconds,
+            max_cname_depth=execution_policy.dns_max_cname_depth,
+            max_answers=execution_policy.dns_max_answers,
+        ),
+        execution_policy,
+        asset_id=asset_id,
+        asset_type=asset["asset_type"],
+        canonical_value=asset["canonical_value"],
+    )
+    results = run_inventory_authorization_tests(
+        replace(config, base_url=origin),
+        transport,
+    )
+    if openapi_path is not None:
+        results["skipped_operations"] = skipped_operations
+        results["summary"]["skipped"] = len(skipped_operations)
+        results["limitations"].append(
+            "Inventory-scoped execution used only explicitly configured policy "
+            "operations; redirects, retries, and connection reuse are disabled."
+        )
+    results["limitations"].append(
+        "DNS addresses were pinned and checked against current address policy "
+        "for each request. Revocation can be delayed while SQLite authorization "
+        "is reserved through response headers."
+    )
+    return results
+
 
 def list_policy_files(policy_dir: Path) -> list[str]:
     """List valid AuthMatrix YAML policies without checking credentials."""
