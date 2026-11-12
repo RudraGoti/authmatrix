@@ -23,6 +23,20 @@ def test_health_endpoint():
     assert "version" in response.json()
 
 
+def test_gui_serves_inventory_and_scope_navigation():
+    client = TestClient(create_app())
+
+    dashboard = client.get("/")
+    script = client.get("/static/app.js")
+
+    assert dashboard.status_code == 200
+    assert 'href="#assets" data-page="assets"' in dashboard.text
+    assert 'href="#scope" data-page="scope"' in dashboard.text
+    assert script.status_code == 200
+    assert "/api/assets" in script.text
+    assert "/api/scope" in script.text
+
+
 def test_status_endpoint():
     client = TestClient(create_app())
 

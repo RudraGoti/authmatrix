@@ -21,6 +21,7 @@ AuthMatrix is a Python-based API security testing tool designed to identify auth
 - Scan baseline comparison.
 - Local vulnerable and fixed API lab environments.
 - Persistent scan history and a local-first FastAPI dashboard.
+- Local asset inventory with explicit authorization metadata and scope exclusions.
 - Local OpenAPI operation inventory browsing.
 - Sanitized findings and evidence handling.
 
@@ -137,7 +138,8 @@ If you change the local lab port, update `scope.base_url` in a copied policy fil
 
 ## Local API
 
-AuthMatrix includes a FastAPI backend that exposes local health, status, and authorization-scanning endpoints.
+AuthMatrix includes a FastAPI backend that exposes local health, status,
+authorization-scanning, asset-inventory, and scope-management endpoints.
 
 ### Start the API
 
@@ -197,6 +199,18 @@ Once the server is running:
 | `GET` | `/api/status` | Returns readiness and supported capabilities. |
 | `GET` | `/api/policies` | Lists valid YAML policies under the configured policy directory. |
 | `GET` | `/api/policies/{name}` | Returns safe policy metadata without credentials. |
+| `GET` | `/api/assets` | Searches and filters locally registered assets and returns inventory totals. |
+| `POST` | `/api/assets` | Registers an asset; it is pending unless explicit authorization is confirmed. |
+| `GET` | `/api/assets/{id}` | Returns asset metadata and its current scope entry. |
+| `PUT` | `/api/assets/{id}` | Updates asset description, name, tags, grouping, or canonical value. |
+| `DELETE` | `/api/assets/{id}` | Deletes an asset and its scope entry. |
+| `PATCH` | `/api/assets/{id}/active` | Activates or deactivates an asset. |
+| `PUT` | `/api/assets/{id}/authorization` | Records explicit authorization status, reference, and dates. |
+| `POST` | `/api/assets/{id}/revoke` | Revokes authorization without deleting the asset. |
+| `GET` | `/api/scope` | Shows configured inclusions/exclusions and current authorization eligibility. |
+| `POST` | `/api/scope` | Adds or changes an asset's include/exclude scope entry. |
+| `DELETE` | `/api/scope/{id}` | Removes an asset's scope entry. |
+| `POST` | `/api/scope/validate` | Checks a proposed literal target against inclusion, exclusions, and authorization. |
 | `GET` | `/api/openapi/specs` | Lists parseable local OpenAPI documents. |
 | `GET` | `/api/openapi/specs/{name}` | Returns a sanitized local operation inventory. |
 | `GET` | `/api/openapi/mappings` | Lists explicit local `*.mapping.yaml` value files. |
@@ -246,6 +260,41 @@ export AUTHMATRIX_POLICY_DIR=/path/to/policies
 ```
 
 The API does not accept arbitrary target URLs or credentials in scan requests. Existing AuthMatrix policy and scope restrictions remain enforced.
+
+### Asset Inventory and Authorization Scope
+
+The local Asset Inventory supports domains, subdomains, hostnames, IPv4/IPv6
+addresses, and strict IPv4/IPv6 CIDR networks. Hostnames are normalized to
+lowercase IDNA ASCII. IP addresses are normalized by Python's standard-library
+IP parser; CIDRs with host bits set are rejected rather than widened.
+
+Registering an asset performs no DNS lookup, HTTP request, crawling, discovery,
+or scan. A new asset is pending by default. To authorize it, the operator must
+explicitly confirm authorization and provide a non-empty reference such as an
+approval or ticket ID. Optional start and expiry dates are enforced by the API.
+Expired, not-yet-started, revoked, pending, unverified, or inactive assets are
+not eligible for scope.
+
+The Asset Inventory and Authorization Scope pages provide real SQLite-backed
+CRUD, search, filters, current authorization metadata, explicit include/exclude
+entries, an effective-scope view, and a server-side target eligibility check.
+An exclusion takes precedence over every inclusion: host exclusions defeat
+parent-domain inclusions, and overlapping IP exclusions defeat network
+inclusions. Domain matching uses label boundaries, not substring or wildcard
+matching. Domain entries never authorize DNS-resolved IP addresses.
+
+Inventory records share the existing private, local SQLite database at
+`~/.authmatrix/authmatrix-scans.sqlite3`. Authorization references are plain
+operator-provided identifiers; do not enter secrets or upload legal documents.
+The inventory is bounded to 5,000 assets and retains the current authorization
+record, not a revision history.
+This feature does not connect inventory scope to existing scanner execution:
+the existing API scanner continues to enforce its own loopback-only policy
+allowlist. Any future scanner must call the central backend scope evaluator
+immediately before execution and revalidate the final resolved destination.
+DNS rebinding defenses, hostname-to-IP pinning, redirect checks for arbitrary
+domains, and resolution-time authorization are reserved for that future
+execution path and are not implemented by inventory registration or preview.
 
 OpenAPI browsing is limited to parseable JSON/YAML files directly under the
 local `examples/` directory by default. Set `AUTHMATRIX_OPENAPI_DIR` to select

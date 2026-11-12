@@ -7,6 +7,8 @@ const API = {
   scans: "/api/scans",
   findings: "/api/findings",
   comparisons: "/api/comparisons",
+  assets: "/api/assets",
+  scope: "/api/scope",
   openapi: "/api/openapi/specs",
   openapiMappings: "/api/openapi/mappings",
 };
@@ -15,6 +17,8 @@ const PAGE_NAMES = {
   dashboard: "Dashboard",
   "new-scan": "New Scan",
   policies: "Policies",
+  assets: "Asset Inventory",
+  scope: "Authorization Scope",
   openapi: "OpenAPI",
   findings: "Findings",
   reports: "Reports",
@@ -23,6 +27,8 @@ const PAGE_NAMES = {
 
 const PAGE_DESCRIPTIONS = {
   policies: "Review validated policies and their safe configuration metadata.",
+  assets: "Register assets and record explicit authorization for future assessments.",
+  scope: "Review included assets, exclusions, and current authorization eligibility.",
   openapi: "Browse supported operations from configured local OpenAPI documents.",
   findings: "Review authorization findings from completed scans.",
   reports: "Open JSON/HTML reports and compare completed scans against baselines.",
@@ -77,14 +83,18 @@ let activePage = "dashboard";
 let scanPollTimer = null;
 let statusRefreshInFlight = false;
 let overviewLoaded = false;
+let assetSearch = "";
+let assetTypeFilter = "";
+let assetStatusFilter = "";
+let assetOffset = 0;
 
 function navigate(page) {
   const selectedPage = PAGE_NAMES[page] ? page : "dashboard";
   const isDashboard = selectedPage === "dashboard";
   const isNewScan = selectedPage === "new-scan";
-  const isWorkspacePage = ["policies", "openapi", "findings", "reports", "history"].includes(
-    selectedPage,
-  );
+  const isWorkspacePage = [
+    "policies", "assets", "scope", "openapi", "findings", "reports", "history",
+  ].includes(selectedPage);
 
   elements.dashboardPage.hidden = !isDashboard;
   elements.newScanPage.hidden = !isNewScan;
@@ -146,6 +156,10 @@ async function fetchJson(url, options = {}) {
     cache: "no-store",
     credentials: "same-origin",
   });
+
+  if (response.status === 204) {
+    return null;
+  }
 
   let data;
 
@@ -304,7 +318,9 @@ function createWorkspaceCard(titleText, detailsText = "") {
 }
 
 async function loadWorkspace(page = activePage) {
-  if (!["policies", "openapi", "findings", "reports", "history"].includes(page)) {
+  if (![
+    "policies", "assets", "scope", "openapi", "findings", "reports", "history",
+  ].includes(page)) {
     return;
   }
 
@@ -317,6 +333,10 @@ async function loadWorkspace(page = activePage) {
   try {
     if (page === "policies") {
       await renderPoliciesWorkspace();
+    } else if (page === "assets") {
+      await renderAssetsWorkspace();
+    } else if (page === "scope") {
+      await renderScopeWorkspace();
     } else if (page === "openapi") {
       await renderOpenApiWorkspace();
     } else if (page === "findings") {
@@ -355,6 +375,590 @@ async function renderPoliciesWorkspace() {
     card.append(identityList, scope, operations);
     elements.workspaceContent.append(card);
   }
+}
+
+function inventoryButton(label, action, className = "secondary-button") {
+  const button = document.createElement("button");
+  button.className = className;
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", action);
+  return button;
+}
+
+function inventoryField(form, labelText, name, value = "", type = "text", required = false) {
+  const field = document.createElement("div");
+  field.className = "inventory-control";
+  const label = document.createElement("label");
+  const id = `asset-${name}`;
+  label.htmlFor = id;
+  label.textContent = labelText;
+  const input = document.createElement("input");
+  input.id = id;
+  input.name = name;
+  input.type = type;
+  input.value = value || "";
+  input.required = required;
+  if (type === "text") {
+    input.maxLength = name === "description" ? 2000 : 255;
+  }
+  field.append(label, input);
+  form.append(field);
+  return input;
+}
+
+function inventorySelect(form, labelText, name, options, selected = "") {
+  const field = document.createElement("div");
+  field.className = "inventory-control";
+  const label = document.createElement("label");
+  const id = `asset-${name}`;
+  label.htmlFor = id;
+  label.textContent = labelText;
+  const select = document.createElement("select");
+  select.id = id;
+  select.name = name;
+  options.forEach(([value, title]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = title;
+    option.selected = value === selected;
+    select.append(option);
+  });
+  field.append(label, select);
+  form.append(field);
+  return select;
+}
+
+const ASSET_TYPES = [
+  ["domain", "Domain"],
+  ["subdomain", "Subdomain"],
+  ["hostname", "Hostname"],
+  ["ipv4", "IPv4 address"],
+  ["ipv6", "IPv6 address"],
+  ["ipv4_cidr", "IPv4 CIDR"],
+  ["ipv6_cidr", "IPv6 CIDR"],
+];
+
+function assetActions(asset) {
+  const actions = document.createElement("div");
+  actions.className = "inventory-actions";
+  actions.append(
+    inventoryButton("View", () => showAssetDetails(asset.asset_id)),
+    inventoryButton("Edit", () => showAssetForm(asset)),
+    inventoryButton("Authorization", () => showAuthorizationForm(asset)),
+    inventoryButton(asset.active ? "Deactivate" : "Reactivate", async () => {
+      try {
+        await fetchJson(`${API.assets}/${encodeURIComponent(asset.asset_id)}/active`, {
+          method: "PATCH",
+          body: JSON.stringify({ active: !asset.active }),
+        });
+        await renderAssetsWorkspace();
+        showWorkspaceMessage(`Asset ${asset.active ? "deactivated" : "reactivated"}.`, "success");
+      } catch (error) {
+        showWorkspaceMessage(error.message, "error");
+      }
+    }),
+    inventoryButton("Delete", async () => {
+      if (!window.confirm(`Delete asset "${asset.name}" and its scope entry?`)) {
+        return;
+      }
+      try {
+        await fetchJson(`${API.assets}/${encodeURIComponent(asset.asset_id)}`, {
+          method: "DELETE",
+        });
+        await renderAssetsWorkspace();
+        showWorkspaceMessage("Asset deleted.", "success");
+      } catch (error) {
+        showWorkspaceMessage(error.message, "error");
+      }
+    }),
+  );
+  if (asset.authorization_status !== "revoked") {
+    actions.append(
+      inventoryButton("Revoke authorization", async () => {
+        if (!window.confirm(`Revoke authorization for "${asset.name}"?`)) {
+          return;
+        }
+        try {
+          await fetchJson(`${API.assets}/${encodeURIComponent(asset.asset_id)}/revoke`, {
+            method: "POST",
+          });
+          await renderAssetsWorkspace();
+          showWorkspaceMessage("Authorization revoked; this asset is no longer eligible.", "success");
+        } catch (error) {
+          showWorkspaceMessage(error.message, "error");
+        }
+      }),
+    );
+  }
+  return actions;
+}
+
+async function renderAssetsWorkspace() {
+  const params = new URLSearchParams({ limit: "100", offset: String(assetOffset) });
+  if (assetSearch) params.set("search", assetSearch);
+  if (assetTypeFilter) params.set("asset_type", assetTypeFilter);
+  if (assetStatusFilter) params.set("authorization_status", assetStatusFilter);
+  const data = await fetchJson(`${API.assets}?${params}`);
+  elements.workspaceContent.replaceChildren();
+
+  const summary = document.createElement("div");
+  summary.className = "stats-grid inventory-stats";
+  [
+    ["Total assets", data.summary.total],
+    ["Eligible", data.summary.authorized],
+    ["Pending", data.summary.pending],
+    ["Expired", data.summary.expired],
+    ["Revoked", data.summary.revoked],
+    ["Inactive", data.summary.inactive],
+  ].forEach(([title, count]) => {
+    const card = document.createElement("article");
+    card.className = "stat-card";
+    const label = document.createElement("div");
+    label.className = "stat-top";
+    label.textContent = title;
+    const value = document.createElement("div");
+    value.className = "stat-value";
+    value.textContent = String(count);
+    card.append(label, value);
+    summary.append(card);
+  });
+  elements.workspaceContent.append(summary);
+
+  const controls = document.createElement("section");
+  controls.className = "panel inventory-toolbar";
+  const searchForm = document.createElement("form");
+  searchForm.className = "inventory-filters";
+  const search = inventoryField(searchForm, "Search", "search", assetSearch);
+  search.placeholder = "Name, value, description, or tag";
+  search.setAttribute("aria-label", "Search assets");
+  const type = inventorySelect(searchForm, "Asset type", "type", [
+    ["", "All types"],
+    ...ASSET_TYPES,
+  ], assetTypeFilter);
+  const status = inventorySelect(searchForm, "Authorization", "status", [
+    ["", "All statuses"],
+    ["authorized", "Authorized"],
+    ["pending", "Pending"],
+    ["expired", "Expired"],
+    ["revoked", "Revoked"],
+    ["unverified", "Unverified"],
+  ], assetStatusFilter);
+  const submit = document.createElement("button");
+  submit.className = "secondary-button";
+  submit.type = "submit";
+  submit.textContent = "Search";
+  searchForm.append(submit);
+  searchForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    assetSearch = search.value;
+    assetTypeFilter = type.value;
+    assetStatusFilter = status.value;
+    assetOffset = 0;
+    await loadWorkspace("assets");
+  });
+  const add = inventoryButton("Add asset", () => showAssetForm(), "primary-button");
+  controls.append(searchForm, add);
+  elements.workspaceContent.append(controls);
+
+  const assets = Array.isArray(data.assets) ? data.assets : [];
+  if (assets.length === 0) {
+    const empty = document.createElement("section");
+    empty.className = "panel empty-state";
+    empty.textContent = data.summary.total
+      ? "No assets match these filters."
+      : "No assets registered yet. Adding an asset does not authorize or scan it.";
+    elements.workspaceContent.append(empty);
+  } else {
+    const tablePanel = document.createElement("section");
+    tablePanel.className = "panel inventory-table-panel";
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    ["Asset", "Type", "Authorization", "Expiry", "State", "Created", "Actions"].forEach((text) => {
+      const th = document.createElement("th");
+      th.textContent = text;
+      headerRow.append(th);
+    });
+    head.append(headerRow);
+    const body = document.createElement("tbody");
+    assets.forEach((asset) => {
+      const row = document.createElement("tr");
+      [
+        `${asset.name}\n${asset.canonical_value}`,
+        asset.asset_type,
+        asset.authorization_status,
+        asset.authorization_expires_at || "—",
+        asset.active ? "Active" : "Inactive",
+        new Date(asset.created_at).toLocaleDateString(),
+      ].forEach((text, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = text;
+        if (index === 0) cell.className = "asset-name-cell";
+        row.append(cell);
+      });
+      const actionCell = document.createElement("td");
+      actionCell.append(assetActions(asset));
+      row.append(actionCell);
+      body.append(row);
+    });
+    table.append(head, body);
+    const scroll = document.createElement("div");
+    scroll.className = "table-scroll";
+    scroll.append(table);
+    tablePanel.append(scroll);
+    elements.workspaceContent.append(tablePanel);
+  }
+
+  const pagination = document.createElement("div");
+  pagination.className = "inventory-pagination";
+  const pageInfo = document.createElement("span");
+  pageInfo.className = "muted";
+  pageInfo.textContent = data.matching_total
+    ? `Showing ${assetOffset + 1}–${assetOffset + assets.length} of ${data.matching_total} matching assets`
+    : "No matching assets";
+  const previous = inventoryButton("Previous", async () => {
+    assetOffset = Math.max(0, assetOffset - 100);
+    await loadWorkspace("assets");
+  });
+  previous.disabled = assetOffset === 0;
+  const next = inventoryButton("Next", async () => {
+    assetOffset += 100;
+    await loadWorkspace("assets");
+  });
+  next.disabled = assetOffset + assets.length >= data.matching_total;
+  pagination.append(pageInfo, previous, next);
+  elements.workspaceContent.append(pagination);
+}
+
+function showAssetForm(asset = null) {
+  const card = createWorkspaceCard(asset ? "Edit asset" : "Add an asset");
+  const form = document.createElement("form");
+  form.className = "inventory-form";
+  inventoryField(form, "Asset name", "name", asset?.name || "", "text", true);
+  inventorySelect(form, "Asset type", "asset_type", ASSET_TYPES, asset?.asset_type || "domain");
+  inventoryField(form, "Asset value", "value", asset?.canonical_value || "", "text", true);
+  const description = document.createElement("textarea");
+  description.name = "description";
+  description.id = "asset-description";
+  description.maxLength = 2000;
+  description.value = asset?.description || "";
+  const descriptionLabel = document.createElement("label");
+  descriptionLabel.htmlFor = description.id;
+  descriptionLabel.textContent = "Description";
+  form.append(descriptionLabel, description);
+  inventoryField(form, "Tags (comma-separated)", "tags", asset?.tags?.join(", ") || "");
+  inventoryField(form, "Organization / workspace", "organization", asset?.organization || "Local workspace");
+
+  let confirmed = null;
+  if (!asset) {
+    confirmed = document.createElement("input");
+    confirmed.type = "checkbox";
+    confirmed.name = "authorization_confirmed";
+    confirmed.id = "asset-authorization-confirmed";
+    const label = document.createElement("label");
+    label.className = "authorization-confirmation";
+    label.htmlFor = confirmed.id;
+    label.append(confirmed, document.createTextNode(" I explicitly confirm authorization for this asset."));
+    form.append(label);
+    inventoryField(form, "Authorization reference (required when confirmed)", "authorization_reference");
+    inventoryField(form, "Authorization starts", "authorization_starts_at", "", "date");
+    inventoryField(form, "Authorization expires", "authorization_expires_at", "", "date");
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "inventory-actions";
+  const save = document.createElement("button");
+  save.className = "primary-button";
+  save.type = "submit";
+  save.textContent = asset ? "Save changes" : "Create asset";
+  actions.append(save, inventoryButton("Cancel", () => loadWorkspace("assets")));
+  form.append(actions);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(form);
+    const payload = {
+      name: values.get("name"),
+      asset_type: values.get("asset_type"),
+      value: values.get("value"),
+      description: values.get("description"),
+      tags: String(values.get("tags") || "").split(",").map((tag) => tag.trim()).filter(Boolean),
+      organization: values.get("organization"),
+    };
+    if (!asset) {
+      payload.authorization_confirmed = confirmed.checked;
+      payload.authorization_reference = values.get("authorization_reference") || null;
+      payload.authorization_starts_at = values.get("authorization_starts_at") || null;
+      payload.authorization_expires_at = values.get("authorization_expires_at") || null;
+    }
+    save.disabled = true;
+    save.textContent = "Saving...";
+    try {
+      await fetchJson(asset ? `${API.assets}/${encodeURIComponent(asset.asset_id)}` : API.assets, {
+        method: asset ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+      });
+      await renderAssetsWorkspace();
+      showWorkspaceMessage(asset ? "Asset updated." : "Asset created. Registration did not trigger a scan.", "success");
+    } catch (error) {
+      save.disabled = false;
+      save.textContent = asset ? "Save changes" : "Create asset";
+      showWorkspaceMessage(error.message, "error");
+    }
+  });
+  card.append(form);
+  elements.workspaceContent.prepend(card);
+  form.querySelector("input")?.focus();
+}
+
+function showAuthorizationForm(asset) {
+  const card = createWorkspaceCard("Update authorization", asset.name);
+  const form = document.createElement("form");
+  form.className = "inventory-form";
+  const status = inventorySelect(form, "Authorization status", "status", [
+    ["pending", "Pending"],
+    ["authorized", "Authorized"],
+    ["unverified", "Unverified"],
+  ], asset.authorization_status === "revoked" ? "pending" : asset.authorization_status);
+  const confirmed = document.createElement("input");
+  confirmed.type = "checkbox";
+  confirmed.name = "authorization_confirmed";
+  confirmed.id = "asset-authorization-confirmed";
+  const confirmation = document.createElement("label");
+  confirmation.className = "authorization-confirmation";
+  confirmation.htmlFor = confirmed.id;
+  confirmation.append(confirmed, document.createTextNode(" I explicitly confirm this authorization is valid."));
+  form.append(confirmation);
+  inventoryField(form, "Authorization reference", "authorization_reference", asset.authorization_reference || "");
+  inventoryField(form, "Authorization starts", "authorization_starts_at", asset.authorization_starts_at || "", "date");
+  inventoryField(form, "Authorization expires", "authorization_expires_at", asset.authorization_expires_at || "", "date");
+  status.addEventListener("change", () => {
+    if (status.value !== "authorized") confirmed.checked = false;
+  });
+  const save = document.createElement("button");
+  save.className = "primary-button";
+  save.type = "submit";
+  save.textContent = "Save authorization";
+  const actions = document.createElement("div");
+  actions.className = "inventory-actions";
+  actions.append(save, inventoryButton("Cancel", () => loadWorkspace("assets")));
+  form.append(actions);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(form);
+    save.disabled = true;
+    try {
+      await fetchJson(`${API.assets}/${encodeURIComponent(asset.asset_id)}/authorization`, {
+        method: "PUT",
+        body: JSON.stringify({
+          status: status.value,
+          authorization_confirmed: confirmed.checked,
+          authorization_reference: values.get("authorization_reference") || null,
+          authorization_starts_at: values.get("authorization_starts_at") || null,
+          authorization_expires_at: values.get("authorization_expires_at") || null,
+        }),
+      });
+      await renderAssetsWorkspace();
+      showWorkspaceMessage("Authorization record updated.", "success");
+    } catch (error) {
+      save.disabled = false;
+      showWorkspaceMessage(error.message, "error");
+    }
+  });
+  card.append(form);
+  elements.workspaceContent.prepend(card);
+  status.focus();
+}
+
+async function showAssetDetails(assetId) {
+  try {
+    const asset = await fetchJson(`${API.assets}/${encodeURIComponent(assetId)}`);
+    const card = createWorkspaceCard(asset.name, asset.canonical_value);
+    const details = document.createElement("dl");
+    details.className = "asset-details";
+    [
+      ["Type", asset.asset_type],
+      ["Description", asset.description || "—"],
+      ["Tags", asset.tags.join(", ") || "—"],
+      ["Organization", asset.organization],
+      ["Authorization status", asset.authorization_status],
+      ["Authorization confirmed", asset.authorization_confirmed ? "Yes" : "No"],
+      ["Authorization reference", asset.authorization_reference || "—"],
+      ["Authorization starts", asset.authorization_starts_at || "—"],
+      ["Authorization expires", asset.authorization_expires_at || "No expiry recorded"],
+      ["Active", asset.active ? "Yes" : "No"],
+      ["Effective scope eligible", asset.effective_scope_eligible ? "Yes" : `No (${asset.eligibility_reason})`],
+      ["Scope entry", asset.scope?.direction || "Not included or excluded"],
+      ["Created", asset.created_at],
+      ["Updated", asset.updated_at],
+    ].forEach(([term, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      details.append(dt, dd);
+    });
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "Current authorization metadata is retained; historical revisions are not currently stored.";
+    card.append(details, note, assetActions(asset), inventoryButton("Back to assets", () => renderAssetsWorkspace()));
+    elements.workspaceContent.replaceChildren(card);
+  } catch (error) {
+    showWorkspaceMessage(error.message, "error");
+  }
+}
+
+async function renderScopeWorkspace() {
+  const scope = await fetchJson(API.scope);
+  elements.workspaceContent.replaceChildren();
+  const notice = document.createElement("div");
+  notice.className = "notice";
+  notice.textContent = `${scope.message} Includes require active, current authorization. Exclusions override every inclusion, including parent domains and overlapping networks.`;
+  elements.workspaceContent.append(notice);
+
+  const summary = document.createElement("div");
+  summary.className = "stats-grid inventory-stats";
+  [
+    ["Eligible includes", scope.eligible_count],
+    ["Ineligible includes", scope.ineligible_count],
+    ["Exclusions", scope.excluded.length],
+  ].forEach(([title, count]) => {
+    const card = document.createElement("article");
+    card.className = "stat-card";
+    const label = document.createElement("div");
+    label.className = "stat-top";
+    label.textContent = title;
+    const value = document.createElement("div");
+    value.className = "stat-value";
+    value.textContent = String(count);
+    card.append(label, value);
+    summary.append(card);
+  });
+  elements.workspaceContent.append(summary);
+
+  const addCard = createWorkspaceCard("Add a scope entry", "An asset may be explicitly included or excluded.");
+  const addForm = document.createElement("form");
+  addForm.className = "inventory-form";
+  const assetFilter = inventoryField(addForm, "Find an asset", "asset_search");
+  assetFilter.placeholder = "Search by name or canonical value";
+  const assetSelect = inventorySelect(addForm, "Asset", "asset_id", []);
+  const direction = inventorySelect(addForm, "Scope action", "direction", [
+    ["include", "Include (requires authorization)"],
+    ["exclude", "Exclude"],
+  ]);
+  async function loadScopeAssets(searchValue = "") {
+    const params = new URLSearchParams({ limit: "100" });
+    if (searchValue) params.set("search", searchValue);
+    const result = await fetchJson(`${API.assets}?${params}`);
+    assetSelect.replaceChildren();
+    result.assets.forEach((asset) => {
+      const option = document.createElement("option");
+      option.value = asset.asset_id;
+      option.textContent = `${asset.name} · ${asset.canonical_value} · ${asset.authorization_status}`;
+      assetSelect.append(option);
+    });
+    assetSelect.disabled = result.assets.length === 0;
+  }
+  assetFilter.addEventListener("input", () => {
+    window.clearTimeout(assetFilter.searchTimer);
+    assetFilter.searchTimer = window.setTimeout(
+      () => loadScopeAssets(assetFilter.value).catch((error) => showWorkspaceMessage(error.message, "error")),
+      200,
+    );
+  });
+  await loadScopeAssets();
+  const addButton = document.createElement("button");
+  addButton.className = "primary-button";
+  addButton.type = "submit";
+  addButton.textContent = "Save scope entry";
+  addForm.append(addButton);
+  addForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    addButton.disabled = true;
+    try {
+      await fetchJson(API.scope, {
+        method: "POST",
+        body: JSON.stringify({ asset_id: assetSelect.value, direction: direction.value }),
+      });
+      await renderScopeWorkspace();
+      showWorkspaceMessage("Scope entry saved.", "success");
+    } catch (error) {
+      addButton.disabled = false;
+      showWorkspaceMessage(error.message, "error");
+    }
+  });
+  addCard.append(addForm);
+  elements.workspaceContent.append(addCard);
+
+  for (const [directionName, entries] of [
+    ["Included assets", scope.included],
+    ["Excluded assets", scope.excluded],
+  ]) {
+    const panel = createWorkspaceCard(directionName);
+    if (entries.length === 0) {
+      panel.append(Object.assign(document.createElement("p"), {
+        className: "muted",
+        textContent: "No entries.",
+      }));
+    }
+    entries.forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "scope-entry";
+      const detail = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = `${entry.name} · ${entry.value}`;
+      const status = document.createElement("p");
+      status.className = "activity-meta";
+      status.textContent = directionName.startsWith("Included")
+        ? `${entry.authorization_status} · ${entry.eligible ? "eligible" : `not eligible (${entry.eligibility_reason})`}`
+        : "Excluded regardless of authorization state";
+      detail.append(title, status);
+      const remove = inventoryButton("Remove", async () => {
+        try {
+          await fetchJson(`${API.scope}/${encodeURIComponent(entry.asset_id)}`, { method: "DELETE" });
+          await renderScopeWorkspace();
+          showWorkspaceMessage("Scope entry removed.", "success");
+        } catch (error) {
+          showWorkspaceMessage(error.message, "error");
+        }
+      });
+      row.append(detail, remove);
+      panel.append(row);
+    });
+    elements.workspaceContent.append(panel);
+  }
+
+  const validate = createWorkspaceCard("Check a proposed target", "This validates registered scope only; it performs no network or DNS requests.");
+  const validateForm = document.createElement("form");
+  validateForm.className = "inventory-form";
+  const targetType = inventorySelect(validateForm, "Target type", "target_type", ASSET_TYPES);
+  const targetValue = inventoryField(validateForm, "Target value", "target_value", "", "text", true);
+  const checkButton = document.createElement("button");
+  checkButton.className = "secondary-button";
+  checkButton.type = "submit";
+  checkButton.textContent = "Validate target";
+  const result = document.createElement("pre");
+  result.className = "scope-result";
+  result.setAttribute("role", "status");
+  validateForm.append(checkButton);
+  validateForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    checkButton.disabled = true;
+    result.textContent = "Checking registered scope...";
+    try {
+      const check = await fetchJson(`${API.scope}/validate`, {
+        method: "POST",
+        body: JSON.stringify({ asset_type: targetType.value, value: targetValue.value }),
+      });
+      result.textContent = `${check.eligible ? "ELIGIBLE" : "NOT ELIGIBLE"} · ${check.reason}\n${JSON.stringify(check, null, 2)}`;
+    } catch (error) {
+      result.textContent = `Validation failed: ${error.message}`;
+    } finally {
+      checkButton.disabled = false;
+    }
+  });
+  validate.append(validateForm, result);
+  elements.workspaceContent.append(validate);
 }
 
 async function renderOpenApiWorkspace() {

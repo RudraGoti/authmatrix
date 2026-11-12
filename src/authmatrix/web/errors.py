@@ -15,6 +15,17 @@ from authmatrix.errors import (
 
 logger = logging.getLogger(__name__)
 
+
+class AssetAPIError(Exception):
+    """A sanitized inventory or scope API error."""
+
+    def __init__(self, status_code: int, error: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.error = error
+        self.detail = detail
+
+
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -29,6 +40,16 @@ SECURITY_HEADERS = {
 
 def register_error_handlers(app: FastAPI) -> None:
     """Register handlers that never expose raw exception details."""
+
+    @app.exception_handler(AssetAPIError)
+    async def asset_api_error_handler(
+        request: Request,
+        exc: AssetAPIError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": exc.error, "detail": exc.detail},
+        )
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(

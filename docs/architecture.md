@@ -1,6 +1,7 @@
 # Architecture and safety boundaries
 
-AuthMatrix is a policy-driven authorization checker with six stages:
+AuthMatrix is a policy-driven authorization checker with six existing
+scanner/application stages plus the asset inventory foundation:
 
 1. **Configuration validation** loads a local YAML policy and requires an explicit
    authorization declaration plus an exact allowlist entry for the target.
@@ -29,12 +30,26 @@ AuthMatrix is a policy-driven authorization checker with six stages:
 6. **Web persistence** stores scan status, metadata, and sanitized result
    documents in a local SQLite database. It is bounded to 1,000 scans; scans
    left running at process restart are marked failed.
+7. **Asset inventory and scope preview** store canonical host/address/network
+   declarations, current authorization metadata, and explicit include/exclude
+   entries in that same protected SQLite database. A shared backend evaluator
+   enforces date, active-state, inclusion, and exclusion rules for preview and
+   proposed-target validation. It performs no network or DNS requests.
 
 The current implementation intentionally permits targets only at literal loopback
 IP addresses (`127.0.0.1` or `::1`) listed in `scope.allowed_hosts`. It does not
 resolve hostnames or accept a network target. The built-in demo API is read-only.
 Destructive HTTP methods are rejected unless explicitly enabled in a local policy;
 they are not used by the included examples or lab.
+
+Asset inventory authorization is separate from scanner policy authorization.
+Inventory creation does not authorize or launch a scan, and the inventory scope
+evaluator is not currently connected to CLI or API scanner execution. Existing
+scans continue to use their existing loopback-only policy allowlist. Future
+scanners must reuse the central scope evaluator and perform execution-time DNS/IP
+validation, destination pinning, and redirect checks. DNS rebinding defenses and
+hostname-to-IP authorization are not implemented by asset registration or scope
+preview.
 
 The BOLA and BFLA labels identify policy checks, not proof of a complete
 vulnerability assessment. AuthMatrix does not infer a correct authorization
@@ -72,7 +87,10 @@ permissions: its directory is restricted to the current user, the database is
 restricted to mode `0600`, and symlink/hardlink database paths are rejected.
 The directory must be owned by the account running AuthMatrix. Existing scan
 data is retained when permissions are tightened; unrelated directory entries
-are not removed. Results are not encrypted at rest.
+are not removed. Scan results and inventory data are not encrypted at rest.
+Inventory entries store the current authorization record only, not historical
+authorization revisions. Authorization references should be identifiers, not
+secrets or uploaded legal documents.
 
 The dashboard follows a local, single-user trust model and does not authenticate
 readers. Any local process able to reach it can inspect scan history and
