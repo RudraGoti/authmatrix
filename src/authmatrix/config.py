@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from authmatrix.errors import ConfigurationError, ScopeError
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ALL_METHODS = SAFE_METHODS | DESTRUCTIVE_METHODS
+MAX_POLICY_BYTES = 1024 * 1024
 RESPONSE_ID_PATH = re.compile(
     r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+|\[[0-9]+\]|\[\*\])*$"
 )
@@ -144,17 +146,66 @@ def validate_scope(base_url: str, allowed_hosts: tuple[str, ...]) -> None:
             raise ScopeError("scope.allowed_hosts entries must be loopback IPs.")
 
 
-def load_config(path: str | Path, *, check_auth_env: bool = False) -> ScanConfig:
-    source = Path(path).expanduser().resolve()
+def _read_policy_document(path: Path) -> Any:
+    """Read a bounded regular policy file without following symlinks where supported."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
 
     try:
-        raw = yaml.safe_load(source.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ConfigurationError(f"Cannot read configuration file: {source}") from exc
-    except yaml.YAMLError as exc:
+        descriptor = os.open(path, flags)
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError("Cannot access policy configuration file.") from exc
+
+    try:
+        with os.fdopen(descriptor, "rb") as policy_file:
+            descriptor = -1
+            info = os.fstat(policy_file.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ConfigurationError(
+                    "Policy configuration must be a regular file."
+                )
+            if info.st_size > MAX_POLICY_BYTES:
+                raise ConfigurationError(
+                    "Policy configuration exceeds the 1 MiB size limit."
+                )
+            content = policy_file.read(MAX_POLICY_BYTES + 1)
+            if len(content) > MAX_POLICY_BYTES:
+                raise ConfigurationError(
+                    "Policy configuration exceeds the 1 MiB size limit."
+                )
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError("Cannot read policy configuration file.") from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise ConfigurationError(
+                    "Cannot close policy configuration file."
+                ) from exc
+
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ConfigurationError(
-            f"Invalid YAML in configuration file: {source}"
+            "Policy configuration must be valid UTF-8."
         ) from exc
+
+    try:
+        return yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError) as exc:
+        raise ConfigurationError("Policy configuration is not valid YAML.") from exc
+
+
+def load_config(path: str | Path, *, check_auth_env: bool = False) -> ScanConfig:
+    try:
+        policy_path = Path(path).expanduser()
+        source = policy_path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ConfigurationError("Cannot access policy configuration file.") from exc
+
+    raw = _read_policy_document(policy_path)
 
     root = _mapping(raw, "Configuration")
 

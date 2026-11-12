@@ -1,6 +1,7 @@
 """Service functions connecting the web API to the AuthMatrix engine."""
 
 import os
+import stat
 from pathlib import Path
 
 from authmatrix.config import load_config
@@ -53,13 +54,14 @@ def resolve_policy_path(policy_path: str, policy_dir: Path) -> Path:
         raise ConfigurationError("Only YAML policy files are supported.")
 
     try:
-        resolved = (root / supplied).resolve(strict=True)
-        resolved.relative_to(root)
+        candidate = root / supplied
+        resolved_parent = candidate.parent.resolve(strict=True)
+        resolved_parent.relative_to(root)
+        resolved = resolved_parent / candidate.name
+        if not stat.S_ISREG(resolved.lstat().st_mode):
+            raise ConfigurationError("Policy path must reference a regular file.")
     except (OSError, ValueError, RuntimeError) as exc:
         raise ConfigurationError("Policy file is unavailable.") from exc
-
-    if not resolved.is_file():
-        raise ConfigurationError("Policy path must reference a file.")
 
     return resolved
 
@@ -117,10 +119,8 @@ def list_policy_files(policy_dir: Path) -> list[str]:
             continue
 
         try:
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(root)
-
-            if not resolved.is_file() or resolved.parent != root:
+            resolved = resolve_policy_path(candidate.name, root)
+            if resolved.parent != root:
                 continue
 
             load_config(resolved, check_auth_env=False)
