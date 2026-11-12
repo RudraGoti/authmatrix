@@ -283,8 +283,16 @@ CRUD, search, filters, current authorization metadata, explicit include/exclude
 entries, an effective-scope view, and a server-side target eligibility check.
 An exclusion takes precedence over every inclusion: host exclusions defeat
 parent-domain inclusions, and overlapping IP exclusions defeat network
-inclusions. Domain matching uses label boundaries, not substring or wildcard
-matching. Domain entries never authorize DNS-resolved IP addresses.
+inclusions. DNS scope matching is explicit: a `hostname` inclusion matches
+only that exact canonical hostname; a `domain` inclusion matches its exact
+domain and hostnames beneath it at DNS label boundaries; and a `subdomain`
+inclusion represents that exact subdomain plus its delegated descendant
+hostnames, also at label boundaries. For example, `api.example.com` as a
+hostname does not include `admin.api.example.com`, while `team.example.com`
+as a subdomain does include `dev.team.example.com`. Similar-prefix names such as
+`notexample.com` and `evilapi.example.com` do not match. These rules use only
+canonical strings and do not resolve DNS. Domain entries never authorize
+DNS-resolved IP addresses.
 
 Inventory records share the existing private, local SQLite database at
 `~/.authmatrix/authmatrix-scans.sqlite3`. Authorization references are plain
