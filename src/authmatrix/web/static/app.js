@@ -694,12 +694,23 @@ function showAssetForm(asset = null) {
     save.disabled = true;
     save.textContent = "Saving...";
     try {
-      await fetchJson(asset ? `${API.assets}/${encodeURIComponent(asset.asset_id)}` : API.assets, {
+      const saved = await fetchJson(asset ? `${API.assets}/${encodeURIComponent(asset.asset_id)}` : API.assets, {
         method: asset ? "PUT" : "POST",
         body: JSON.stringify(payload),
       });
       await renderAssetsWorkspace();
-      showWorkspaceMessage(asset ? "Asset updated." : "Asset created. Registration did not trigger a scan.", "success");
+      const targetChanged = asset && (
+        asset.asset_type !== saved.asset_type ||
+        asset.canonical_value !== saved.canonical_value
+      );
+      showWorkspaceMessage(
+        targetChanged
+          ? "Target changed; authorization was reset to pending and must be explicitly confirmed again."
+          : asset
+            ? "Asset updated."
+            : "Asset created. Registration did not trigger a scan.",
+        "success",
+      );
     } catch (error) {
       save.disabled = false;
       save.textContent = asset ? "Save changes" : "Create asset";

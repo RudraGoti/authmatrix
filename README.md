@@ -274,6 +274,9 @@ explicitly confirm authorization and provide a non-empty reference such as an
 approval or ticket ID. Optional start and expiry dates are enforced by the API.
 Expired, not-yet-started, revoked, pending, unverified, or inactive assets are
 not eligible for scope.
+Changing an asset's canonical value or type resets its authorization to pending;
+the new target must be explicitly authorized again. Metadata-only edits preserve
+the current authorization record.
 
 The Asset Inventory and Authorization Scope pages provide real SQLite-backed
 CRUD, search, filters, current authorization metadata, explicit include/exclude

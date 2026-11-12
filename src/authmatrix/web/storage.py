@@ -356,7 +356,22 @@ class ScanStore:
             cursor = connection.execute(
                 """
                 UPDATE assets SET name = ?, asset_type = ?, canonical_value = ?,
-                    description = ?, tags_json = ?, organization = ?, updated_at = ?
+                    description = ?, tags_json = ?, organization = ?, updated_at = ?,
+                    authorization_status = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN 'pending' ELSE authorization_status END,
+                    authorization_confirmed = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN 0 ELSE authorization_confirmed END,
+                    authorization_reference = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN NULL ELSE authorization_reference END,
+                    authorization_starts_at = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN NULL ELSE authorization_starts_at END,
+                    authorization_expires_at = CASE
+                        WHEN asset_type != ? OR canonical_value != ?
+                        THEN NULL ELSE authorization_expires_at END
                 WHERE asset_id = ?
                 """,
                 (
@@ -367,6 +382,16 @@ class ScanStore:
                     json.dumps(asset["tags"], ensure_ascii=False),
                     asset["organization"],
                     asset["updated_at"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
+                    asset["asset_type"],
+                    asset["canonical_value"],
                     asset_id,
                 ),
             )

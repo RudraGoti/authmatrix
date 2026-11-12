@@ -276,7 +276,23 @@ def test_asset_api_crud_authorization_and_validation(tmp_path):
     duplicate = _create_asset(client, "Duplicate", "ipv6", "2001:db8::1")
     assert duplicate.status_code == 409
     assert duplicate.json()["error"] == "asset_conflict"
-    updated = client.put(
+    metadata_update = client.put(
+        f"/api/assets/{asset_id}",
+        json={
+            "name": "Updated",
+            "asset_type": "ipv6",
+            "value": "2001:0db8::1",
+            "tags": ["prod"],
+        },
+    )
+    assert metadata_update.status_code == 200
+    assert metadata_update.json()["canonical_value"] == "2001:db8::1"
+    assert metadata_update.json()["authorization_status"] == "authorized"
+    assert metadata_update.json()["tags"] == ["prod"]
+
+    client.post("/api/scope", json={"asset_id": asset_id, "direction": "include"})
+    assert client.get("/api/scope").json()["eligible_count"] == 1
+    changed_target = client.put(
         f"/api/assets/{asset_id}",
         json={
             "name": "Updated",
@@ -285,12 +301,30 @@ def test_asset_api_crud_authorization_and_validation(tmp_path):
             "tags": ["prod"],
         },
     )
-    assert updated.status_code == 200
-    assert updated.json()["authorization_status"] == "authorized"
-    assert updated.json()["tags"] == ["prod"]
+    assert changed_target.status_code == 200
+    assert changed_target.json()["authorization_status"] == "pending"
+    assert changed_target.json()["authorization_confirmed"] is False
+    assert changed_target.json()["authorization_reference"] is None
+    assert changed_target.json()["authorization_expires_at"] is None
+    assert changed_target.json()["effective_scope_eligible"] is False
+    target_check = client.post(
+        "/api/scope/validate",
+        json={"asset_type": "ipv6", "value": "2001:db8::2"},
+    )
+    assert target_check.json()["eligible"] is False
+    assert target_check.json()["reason"] == "authorization_ineligible"
 
-    client.post("/api/scope", json={"asset_id": asset_id, "direction": "include"})
+    reauthorized = client.put(
+        f"/api/assets/{asset_id}/authorization",
+        json={
+            "status": "authorized",
+            "authorization_confirmed": True,
+            "authorization_reference": "NEW-TICKET",
+        },
+    )
+    assert reauthorized.json()["effective_scope_eligible"] is True
     assert client.get("/api/scope").json()["eligible_count"] == 1
+
     deactivated = client.patch(
         f"/api/assets/{asset_id}/active",
         json={"active": False},
@@ -304,6 +338,35 @@ def test_asset_api_crud_authorization_and_validation(tmp_path):
     assert missing.status_code == 404
     assert missing.json()["error"] == "asset_not_found"
     assert client.get("/api/scope").json()["included"] == []
+
+
+def test_changing_asset_type_invalidates_authorization_even_when_value_is_same(
+    tmp_path,
+):
+    client = TestClient(create_app(data_dir=tmp_path))
+    created = _create_asset(
+        client,
+        "Application",
+        "hostname",
+        "app.example.com",
+        authorization_confirmed=True,
+        authorization_reference="HOST-APPROVAL",
+    )
+    asset_id = created.json()["asset_id"]
+
+    updated = client.put(
+        f"/api/assets/{asset_id}",
+        json={
+            "name": "Application",
+            "asset_type": "domain",
+            "value": "app.example.com",
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["authorization_status"] == "pending"
+    assert updated.json()["authorization_confirmed"] is False
+    assert updated.json()["authorization_reference"] is None
 
 
 def test_asset_api_rejects_urls_dates_and_unknown_fields(tmp_path):
