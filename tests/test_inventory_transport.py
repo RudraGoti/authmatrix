@@ -1,15 +1,17 @@
 import ipaddress
+import socket
 import sqlite3
 import ssl
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from time import sleep
 
 import httpcore
 import httpx
 import pytest
+import trustme
 
 from authmatrix.config import load_config
 from authmatrix.errors import ScanError, ScopeError
@@ -665,6 +667,42 @@ def test_real_pinned_backend_uses_numeric_socket_and_checks_peer(
     assert mismatched_sockets[0].closed is True
 
 
+
+
+def test_ipv4_mapped_loopback_cannot_reach_socket_with_special_scope(
+    tmp_path, monkeypatch
+):
+    # The inventory canonicalizer rejects mapped IPv6 CIDRs.
+    # Test that a mapped DNS answer is rejected before socket creation.
+    store = _store(tmp_path)
+    resolver = FakeResolver(["::ffff:127.0.0.1"])
+    socket_attempts = []
+
+    def forbidden_socket(*args, **kwargs):
+        socket_attempts.append((args, kwargs))
+        raise AssertionError("A prohibited mapped address reached socket creation.")
+
+    monkeypatch.setattr("authmatrix.transport.socket.socket", forbidden_socket)
+
+    transport = _transport(
+        store,
+        resolver,
+        allowed_restricted_classes=frozenset(
+            {
+                AddressClass.SPECIAL,
+                AddressClass.PRIVATE,
+                AddressClass.LOOPBACK,
+            }
+        ),
+    )
+
+    with httpx.Client(transport=transport, trust_env=False) as client:
+        with pytest.raises(ScopeError, match="Resolved addresses"):
+            client.get("http://api.example.com/items")
+
+    assert resolver.calls == ["api.example.com"]
+    assert socket_attempts == []
+
 def test_tls_uses_original_hostname_and_verified_context():
     class FakeSocket:
         def settimeout(self, _timeout):
@@ -695,6 +733,146 @@ def test_tls_uses_original_hostname_and_verified_context():
     with pytest.raises(ScopeError, match="TLS server name"):
         stream.start_tls(fake_context, "attacker.example", 1)
 
+
+
+@pytest.mark.parametrize(
+    ("certificate_hostname", "should_succeed"),
+    [
+        ("api.example.com", True),
+        ("wrong.example.com", False),
+    ],
+)
+def test_inventory_transport_performs_real_tls_hostname_verification(
+    tmp_path, monkeypatch, certificate_hostname, should_succeed
+):
+    ca = trustme.CA()
+    certificate = ca.issue_cert(certificate_hostname)
+
+    ca_path = tmp_path / "test-ca.pem"
+    cert_path = tmp_path / "server-cert.pem"
+    key_path = tmp_path / "server-key.pem"
+
+    ca.cert_pem.write_to_path(ca_path)
+    certificate.cert_chain_pems[0].write_to_path(cert_path)
+    certificate.private_key_pem.write_to_path(key_path)
+
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+
+    observed_sni = []
+    server_context.set_servername_callback(
+        lambda _socket, server_name, _context: observed_sni.append(server_name)
+    )
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+
+    port = listener.getsockname()[1]
+    server_errors = []
+
+    def serve_one_request():
+        try:
+            connection, _peer = listener.accept()
+            with connection:
+                with server_context.wrap_socket(
+                    connection, server_side=True
+                ) as tls_connection:
+                    request_data = bytearray()
+                    while b"\r\n\r\n" not in request_data:
+                        chunk = tls_connection.recv(4096)
+                        if not chunk:
+                            break
+                        request_data.extend(chunk)
+
+                    if b"\r\n\r\n" in request_data:
+                        tls_connection.sendall(_success_response())
+        except (OSError, ssl.SSLError) as error:
+            server_errors.append(error)
+        finally:
+            listener.close()
+
+    server_thread = Thread(target=serve_one_request, daemon=True)
+    server_thread.start()
+
+    store = _store(tmp_path)
+    store.create_asset(
+        {
+            "asset_id": "tls-loopback",
+            "name": "TLS loopback",
+            "asset_type": "ipv4_cidr",
+            "canonical_value": "127.0.0.1/32",
+            "description": "",
+            "tags": [],
+            "organization": "Local workspace",
+            "authorization_status": "authorized",
+            "authorization_confirmed": True,
+            "authorization_reference": "AUTH-TLS",
+            "authorization_starts_at": None,
+            "authorization_expires_at": None,
+            "created_at": "2026-11-12T00:00:00+00:00",
+            "updated_at": "2026-11-12T00:00:00+00:00",
+        }
+    )
+    store.set_scope_entry(
+        "tls-loopback", "include", "2026-11-12T00:00:00+00:00"
+    )
+
+    resolver = FakeResolver(["127.0.0.1"])
+
+    # Trust only the temporary test CA. Hostname verification remains enabled.
+    client_context = ssl.create_default_context(cafile=str(ca_path))
+    assert client_context.verify_mode == ssl.CERT_REQUIRED
+    assert client_context.check_hostname is True
+
+    monkeypatch.setattr(
+        "authmatrix.transport.ssl.create_default_context",
+        lambda: client_context,
+    )
+
+    # The pinned transport must not perform a second, uncontrolled DNS lookup.
+    monkeypatch.setattr(
+        "authmatrix.transport.socket.getaddrinfo",
+        lambda *_args, **_kwargs: pytest.fail(
+            "The inventory transport attempted an uncontrolled DNS lookup."
+        ),
+    )
+
+    transport = _transport(
+        store,
+        resolver,
+        scheme="https",
+        port=port,
+        allowed_ports=frozenset({port}),
+        allow_http=False,
+        allow_public_egress=False,
+        allowed_restricted_classes=frozenset({AddressClass.LOOPBACK}),
+    )
+
+    try:
+        with httpx.Client(transport=transport, trust_env=False) as client:
+            if should_succeed:
+                response = client.get(f"https://api.example.com:{port}/")
+                assert response.status_code == 200
+                assert response.content == b"{}"
+            else:
+                with pytest.raises(ssl.SSLCertVerificationError):
+                    client.get(f"https://api.example.com:{port}/")
+    finally:
+        server_thread.join(timeout=6)
+        if server_thread.is_alive():
+            listener.close()
+            pytest.fail("The local TLS test server did not terminate.")
+
+    assert resolver.calls == ["api.example.com"]
+    assert observed_sni == ["api.example.com"]
+    assert client_context.verify_mode == ssl.CERT_REQUIRED
+    assert client_context.check_hostname is True
+
+    if should_succeed:
+        assert server_errors == []
 
 def _single_operation_config():
     examples = Path(__file__).parents[1] / "examples"

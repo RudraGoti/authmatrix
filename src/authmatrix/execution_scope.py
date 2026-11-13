@@ -58,6 +58,19 @@ _IPV6_SPECIAL = tuple(
         "2002::/16",
     )
 )
+_IPV6_UNSAFE_TRANSITION = tuple(
+    ipaddress.ip_network(value)
+    for value in (
+        "::ffff:0:0/96",
+        "64:ff9b::/96",
+        "64:ff9b:1::/48",
+        "2001::/23",
+        "2002::/16",
+    )
+)
+_IPV6_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
 _IPV6_GLOBAL_UNICAST = ipaddress.ip_network("2000::/3")
 
 
@@ -175,6 +188,18 @@ def validate_address_set(
         ) from exc
     validated = tuple(dict.fromkeys(normalized))
     for address in validated:
+        if address.version == 6 and (
+            any(address in network for network in _IPV6_UNSAFE_TRANSITION)
+            or (
+                address in _IPV6_IPV4_COMPATIBLE
+                and not address.is_unspecified
+                and not address.is_loopback
+            )
+        ):
+            raise AddressPolicyError(
+                "DNS returned an IPv6 transition or IPv4-embedded address."
+            )
+
         address_class = classify_address(address)
         included, excluded = evaluate_ip_scope(address)
         if excluded:

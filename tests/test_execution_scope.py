@@ -67,6 +67,42 @@ def test_address_policy_checks_every_answer_and_exclusions():
         )
 
 
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "::ffff:127.0.0.1",
+        "::ffff:10.0.0.1",
+        "64:ff9b::7f00:1",
+        "64:ff9b:1::a00:1",
+        "2002:7f00:1::",
+        "2001::1",
+        "::a00:1",
+    ],
+)
+def test_address_policy_rejects_ipv4_embedded_and_transition_addresses(
+    value,
+):
+    address = ipaddress.ip_address(value)
+
+    with pytest.raises(
+        AddressPolicyError,
+        match="transition or IPv4-embedded",
+    ):
+        validate_address_set(
+            ResolvedAddressSet((address,)),
+            allow_public_egress=True,
+            allowed_restricted_classes=frozenset(
+                {
+                    AddressClass.SPECIAL,
+                    AddressClass.PRIVATE,
+                    AddressClass.LOOPBACK,
+                }
+            ),
+            evaluate_ip_scope=lambda _address: (True, False),
+        )
+
+
 def test_address_policy_requires_public_egress_and_rejects_non_connectable():
     address = ipaddress.ip_address("8.8.8.8")
     with pytest.raises(AddressPolicyError, match="Public egress"):
