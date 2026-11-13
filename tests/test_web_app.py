@@ -48,6 +48,126 @@ def test_status_endpoint():
     assert "persistent_scan_history" in response.json()["capabilities"]
 
 
+def test_inventory_execution_is_disabled_by_default():
+    response = TestClient(create_app()).post(
+        "/api/scans/inventory",
+        json={
+            "policy_path": "policy.yaml",
+            "asset_id": "untrusted",
+            "authorization_confirmed": True,
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["error"] == "inventory_execution_disabled"
+
+
+def test_inventory_execution_endpoint_uses_server_policy_and_asset_selector(
+    monkeypatch,
+):
+    from authmatrix.web import app as app_module
+
+    monkeypatch.setenv("AUTHMATRIX_INVENTORY_EXECUTION_ENABLED", "true")
+    client = TestClient(create_app())
+    assert (
+        "inventory_scoped_gui_execution"
+        in client.get("/api/status").json()["capabilities"]
+    )
+    asset = client.post(
+        "/api/assets",
+        json={
+            "name": "Authorized API",
+            "asset_type": "hostname",
+            "value": "api.example.com",
+            "authorization_confirmed": True,
+            "authorization_reference": "AUTH-23",
+        },
+    )
+    assert asset.status_code == 201
+    asset_id = asset.json()["asset_id"]
+
+    calls = []
+
+    def fake_scan(*args):
+        calls.append(args)
+        return {
+            "schema_version": 1,
+            "generated_at": "2026-11-12T12:00:00+00:00",
+            "target": "https://api.example.com:443",
+            "summary": {
+                "requests": 1,
+                "passed": 1,
+                "failed": 0,
+                "inconclusive": 0,
+                "findings": 0,
+            },
+            "findings": [],
+            "checks": [],
+        }
+
+    monkeypatch.setattr(app_module, "run_inventory_policy_scan", fake_scan)
+    response = client.post(
+        "/api/scans/inventory",
+        json={
+            "policy_path": "policy.yaml",
+            "asset_id": asset_id,
+            "authorization_confirmed": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][3] == asset_id
+    assert calls[0][4].enabled is True
+    assert calls[0][4].scheme == "https"
+    assert calls[0][4].port == 443
+
+
+def test_inventory_execution_rejects_browser_transport_overrides():
+    response = TestClient(create_app()).post(
+        "/api/scans/inventory",
+        json={
+            "policy_path": "policy.yaml",
+            "asset_id": "asset-id",
+            "authorization_confirmed": True,
+            "scheme": "http",
+            "port": 80,
+            "pinned_ip": "127.0.0.1",
+            "resolver": "attacker-controlled",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_asset_list_reports_effective_include_exclude_eligibility():
+    client = TestClient(create_app())
+    asset = client.post(
+        "/api/assets",
+        json={
+            "name": "Authorized API",
+            "asset_type": "hostname",
+            "value": "api.example.com",
+            "authorization_confirmed": True,
+            "authorization_reference": "AUTH-23",
+        },
+    ).json()
+
+    listed = client.get("/api/assets").json()["assets"][0]
+    assert listed["effective_scope_eligible"] is True
+    assert listed["scope_eligible"] is False
+
+    assert client.post(
+        "/api/scope",
+        json={"asset_id": asset["asset_id"], "direction": "include"},
+    ).status_code == 201
+    assert client.get("/api/assets").json()["assets"][0]["scope_eligible"] is True
+
+    assert client.post(
+        "/api/scope",
+        json={"asset_id": asset["asset_id"], "direction": "exclude"},
+    ).status_code == 201
+    assert client.get("/api/assets").json()["assets"][0]["scope_eligible"] is False
+
+
 def test_openapi_endpoint():
     client = TestClient(create_app())
 
@@ -56,6 +176,7 @@ def test_openapi_endpoint():
     assert response.status_code == 200
     assert "/api/health" in response.json()["paths"]
     assert "/api/scans" in response.json()["paths"]
+    assert "/api/scans/inventory" in response.json()["paths"]
     assert response.json()["paths"]["/api/scans"]["post"]["responses"]["409"]
 
 

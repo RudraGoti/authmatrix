@@ -5,7 +5,11 @@
 AuthMatrix is a Python-based API security testing tool designed to identify authorization weaknesses such as **BOLA/IDOR** and **BFLA** through policy-driven testing. It evaluates access-control decisions across configured identities, resources, and operations, then generates sanitized JSON or HTML reports.
 
 > [!WARNING]
-> **Scope boundary:** AuthMatrix currently accepts only literal loopback IPs (`127.0.0.1` or `::1`). It does not scan public hosts, resolve hostnames, follow redirects, or store response bodies. Use it only on systems you own or are explicitly authorized to test.
+> **Scope boundary:** CLI scans and the existing `/api/scans` endpoint remain
+> loopback-only. A separate inventory-scoped GUI/API mode is disabled by default.
+> When explicitly enabled by server-side settings, it can connect to authorized
+> inventory targets; use it only for systems you own or are explicitly authorized
+> to test. Redirects, retries, crawling, and port discovery are not performed.
 
 ---
 
@@ -22,6 +26,7 @@ AuthMatrix is a Python-based API security testing tool designed to identify auth
 - Local vulnerable and fixed API lab environments.
 - Persistent scan history and a local-first FastAPI dashboard.
 - Local asset inventory with explicit authorization metadata and scope exclusions.
+- Opt-in inventory-scoped GUI execution with bounded DNS resolution and pinned connections.
 - Local OpenAPI operation inventory browsing.
 - Sanitized findings and evidence handling.
 
@@ -215,6 +220,7 @@ Once the server is running:
 | `GET` | `/api/openapi/specs/{name}` | Returns a sanitized local operation inventory. |
 | `GET` | `/api/openapi/mappings` | Lists explicit local `*.mapping.yaml` value files. |
 | `POST` | `/api/scans` | Runs a policy scan, optionally mapped to OpenAPI, after authorization acknowledgement. |
+| `POST` | `/api/scans/inventory` | Runs explicit policy operations against a selected authorized inventory asset when server-side execution is enabled. |
 | `GET` | `/api/scans` | Returns bounded, persistent scan history and totals. |
 | `GET` | `/api/scans/{id}` | Returns scan status or a completed scan result. |
 | `GET` | `/api/findings` | Lists findings from completed scans retained in SQLite. |
@@ -259,7 +265,75 @@ To use a different server-side policy directory, set:
 export AUTHMATRIX_POLICY_DIR=/path/to/policies
 ```
 
-The API does not accept arbitrary target URLs or credentials in scan requests. Existing AuthMatrix policy and scope restrictions remain enforced.
+The API does not accept arbitrary target URLs or credentials in scan requests.
+The existing `/api/scans` endpoint and CLI remain loopback-only. The separate
+inventory endpoint accepts only a stored asset ID as a selector; the backend
+loads and revalidates the asset and scope. Client input cannot set the protocol,
+port, resolver, transport, or pinned address.
+
+#### Enabling inventory-scoped GUI execution
+
+The mode is disabled unless the server operator explicitly enables it. The
+default execution origin is HTTPS port 443, but public destinations also require
+explicit public-egress permission:
+
+```bash
+export AUTHMATRIX_INVENTORY_EXECUTION_ENABLED=true
+export AUTHMATRIX_ALLOW_PUBLIC_EGRESS=true
+authmatrix web
+```
+
+Server-side settings are:
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `AUTHMATRIX_INVENTORY_EXECUTION_ENABLED` | `false` | Enables the separate inventory scan UI and endpoint. |
+| `AUTHMATRIX_ALLOW_PUBLIC_EGRESS` | `false` | Permits DNS answers classified as public global-unicast addresses. |
+| `AUTHMATRIX_INVENTORY_SCHEME` | `https` | Server-selected protocol (`http` or `https`). |
+| `AUTHMATRIX_INVENTORY_PORT` | `443` | Server-selected destination port. |
+| `AUTHMATRIX_INVENTORY_ALLOWED_PORTS` | `443` | Explicit comma-separated port allowlist. |
+| `AUTHMATRIX_INVENTORY_ALLOW_HTTP` | `false` | Required to select HTTP port 80. Add `80` to the allowlist and set the scheme and port accordingly. |
+| `AUTHMATRIX_INVENTORY_RESTRICTED_ADDRESS_CLASSES` | empty | Optional comma-separated `private`, `loopback`, `link_local`, or `special` classes. Each resolved address in these classes still requires a separately authorized, included IP/CIDR asset. |
+| `AUTHMATRIX_DNS_NAMESERVERS` | OS resolver configuration | Optional comma-separated numeric DNS server addresses (one to four). |
+| `AUTHMATRIX_DNS_TIMEOUT_SECONDS` | `3` | Bounded total DNS resolution time. |
+| `AUTHMATRIX_AUTHORIZATION_LOCK_TIMEOUT_SECONDS` | `5` | Maximum wait for the final SQLite authorization reservation. |
+
+HTTP requires `AUTHMATRIX_INVENTORY_ALLOW_HTTP=true`, `AUTHMATRIX_INVENTORY_SCHEME=http`,
+`AUTHMATRIX_INVENTORY_PORT=80`, and `80` in the allowlist. Other ports are only
+usable when explicitly added to the server-side allowlist. The browser has no
+protocol/port controls. Inventory execution uses only paths and operations from
+the selected local policy and optional explicit OpenAPI value mapping.
+
+#### DNS, address authorization, and revocation
+
+The hostname asset must itself be active, explicitly authorized, current, and
+inside effective include/exclude scope before the resolver is called. A domain
+authorization does not authorize an internal address. Public global-unicast
+answers may be used without registering each changing CDN/cloud IP only when
+public egress is enabled. Private, loopback, link-local, and configured special
+answers require both a server-side address-class allowance and a matching
+active, authorized, included IP/CIDR asset. Multicast and unspecified addresses
+are always rejected. Every A/AAAA answer is checked; one disallowed or excluded
+answer rejects the whole set before a target connection.
+
+DNS A/AAAA and CNAME traversal is bounded (three-second default timeout, eight
+CNAME hops, 32 addresses). Truncated UDP responses are retried over TCP to the
+same numeric resolver; incomplete, malformed, empty, over-limit, or mixed-policy
+results fail closed. AuthMatrix pins a request to one validated numeric address,
+checks the actual peer before TLS, retains the original hostname for HTTP
+authority, TLS SNI, and certificate verification, and does not fall back to
+hostname resolution. TLS verification stays enabled. Proxies, redirects,
+retries, keep-alive reuse, and HTTP/2 are disabled for this mode.
+
+Immediately before connecting, AuthMatrix rechecks the asset and complete
+address set inside a SQLite `BEGIN IMMEDIATE` transaction. That reservation is
+held through connection establishment, peer verification, TLS, request
+transmission, and response headers. A revocation completed during DNS is seen by
+the final check and prevents a target socket attempt. A concurrent update after
+the final authorization point waits until response headers are received; this is
+not instantaneous revocation. The bounded transaction can block other SQLite
+writes and they may time out. Operators must protect the local, unauthenticated
+dashboard and configure system DNS and outbound network policy appropriately.
 
 ### Asset Inventory and Authorization Scope
 
@@ -299,13 +373,12 @@ Inventory records share the existing private, local SQLite database at
 operator-provided identifiers; do not enter secrets or upload legal documents.
 The inventory is bounded to 5,000 assets and retains the current authorization
 record, not a revision history.
-This feature does not connect inventory scope to existing scanner execution:
-the existing API scanner continues to enforce its own loopback-only policy
-allowlist. Any future scanner must call the central backend scope evaluator
-immediately before execution and revalidate the final resolved destination.
-DNS rebinding defenses, hostname-to-IP pinning, redirect checks for arbitrary
-domains, and resolution-time authorization are reserved for that future
-execution path and are not implemented by inventory registration or preview.
+Scope preview and registration still perform no DNS or network activity. The
+optional inventory-scoped GUI scan is a distinct execution path; the CLI and
+existing `/api/scans` path continue to enforce their loopback-only allowlist.
+Address classification uses explicit special-purpose ranges in addition to
+standard-library address properties; operators must review and update this
+policy as address allocations and network rules change.
 
 OpenAPI browsing is limited to parseable JSON/YAML files directly under the
 local `examples/` directory by default. Set `AUTHMATRIX_OPENAPI_DIR` to select

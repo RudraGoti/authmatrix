@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from authmatrix import __version__
 from authmatrix.comparison import compare_result_documents
 from authmatrix.config import load_config
+from authmatrix.execution_scope import load_inventory_execution_policy
 from authmatrix.reporting import render_html, sanitize_results
 from authmatrix.web.asset_inventory import (
     AssetValidationError,
@@ -39,6 +40,7 @@ from authmatrix.web.schemas import (
     BaselineComparisonRequest,
     ErrorResponse,
     HealthResponse,
+    InventoryScanRequest,
     ScanRequest,
     ScanResponse,
     ScopeEntryCreate,
@@ -52,6 +54,7 @@ from authmatrix.web.services import (
     list_policy_files,
     load_openapi_inventory,
     resolve_policy_path,
+    run_inventory_policy_scan,
     run_policy_scan,
 )
 from authmatrix.web.storage import ScanStore
@@ -207,6 +210,7 @@ def create_app(
     app.state.scan_lock = Lock()
     app.state.active_scan_id = None
     app.state.trusted_origins = _configured_trusted_origins()
+    app.state.inventory_execution_policy = load_inventory_execution_policy()
 
     @app.middleware("http")
     async def enforce_web_security(request: Request, call_next):
@@ -271,15 +275,18 @@ def create_app(
         tags=["system"],
     )
     async def status() -> StatusResponse:
+        capabilities = [
+            *CAPABILITIES,
+            "persistent_scan_history",
+            "baseline_comparison",
+            "openapi_inventory",
+            "openapi_operation_scanning",
+        ]
+        if app.state.inventory_execution_policy.enabled:
+            capabilities.append("inventory_scoped_gui_execution")
         return StatusResponse(
             version=__version__,
-            capabilities=[
-                *CAPABILITIES,
-                "persistent_scan_history",
-                "baseline_comparison",
-                "openapi_inventory",
-                "openapi_operation_scanning",
-            ],
+            capabilities=capabilities,
         )
 
     @app.get("/api/assets", tags=["assets"])
@@ -302,7 +309,8 @@ def create_app(
         limit: int = Query(default=100, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=5000),
     ) -> dict:
-        assets = app.state.scan_store.list_assets()
+        inventory, scope_entries = app.state.scan_store.authorization_snapshot()
+        assets = inventory
         if search:
             needle = search.casefold()
             assets = [
@@ -330,7 +338,6 @@ def create_app(
         )
         matching_total = len(assets)
         assets = assets[offset : offset + limit]
-        inventory = app.state.scan_store.list_assets()
         summary = {
             "total": len(inventory),
             "authorized": sum(
@@ -352,7 +359,18 @@ def create_app(
             "matching_total": matching_total,
             "limit": limit,
             "offset": offset,
-            "assets": [_asset_response(asset) for asset in assets],
+            "assets": [
+                {
+                    **_asset_response(asset),
+                    "scope_eligible": evaluate_target(
+                        inventory,
+                        scope_entries,
+                        asset["asset_type"],
+                        asset["canonical_value"],
+                    )["eligible"],
+                }
+                for asset in assets
+            ],
         }
 
     @app.post("/api/assets", status_code=201, tags=["assets"])
@@ -696,6 +714,110 @@ def create_app(
             app.state.scan_store.fail(scan_id)
             logger.error(
                 "scan_failed scan_id=%s error_type=%s",
+                scan_id,
+                type(exc).__name__,
+            )
+            raise
+        finally:
+            app.state.active_scan_id = None
+            app.state.scan_lock.release()
+
+    @app.post(
+        "/api/scans/inventory",
+        response_model=ScanResponse,
+        responses={
+            403: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+        tags=["scans"],
+    )
+    async def create_inventory_scan(
+        payload: InventoryScanRequest,
+    ) -> ScanResponse | JSONResponse:
+        if not app.state.inventory_execution_policy.enabled:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "inventory_execution_disabled",
+                    "detail": (
+                        "Inventory-scoped execution is disabled by server policy."
+                    ),
+                },
+            )
+        if (payload.openapi_spec is None) != (payload.values_mapping is None):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "validation_error",
+                    "detail": (
+                        "OpenAPI document and values mapping must be provided together."
+                    ),
+                },
+            )
+        if payload.authorization_confirmed is not True:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "authorization_required",
+                    "detail": "Confirm authorization before starting a scan.",
+                },
+            )
+        if not app.state.scan_lock.acquire(blocking=False):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "scan_in_progress",
+                    "detail": MAX_ACTIVE_SCAN_DETAIL,
+                },
+            )
+
+        scan_id = uuid4().hex
+        started_at = datetime.now(UTC).isoformat()
+        try:
+            app.state.scan_store.start(
+                scan_id,
+                started_at,
+                Path(payload.policy_path).name,
+            )
+            logger.info(
+                "inventory_scan_started scan_id=%s policy=%s",
+                scan_id,
+                Path(payload.policy_path).name,
+            )
+            app.state.active_scan_id = scan_id
+            result = await run_in_threadpool(
+                run_inventory_policy_scan,
+                payload.policy_path,
+                app.state.policy_dir,
+                app.state.scan_store,
+                payload.asset_id,
+                app.state.inventory_execution_policy,
+                payload.openapi_spec,
+                payload.values_mapping,
+                app.state.openapi_dir,
+                app.state.openapi_values_dir,
+                app.state.openapi_max_bytes,
+            )
+            result["scan_id"] = scan_id
+            result["policy"] = Path(payload.policy_path).name
+            result["status"] = "completed"
+            result["summary"].setdefault("skipped", 0)
+            result.setdefault("skipped_operations", [])
+            result = sanitize_results(result)
+            app.state.scan_store.complete(scan_id, result)
+            logger.info(
+                "inventory_scan_completed scan_id=%s requests=%s findings=%s failed=%s",
+                scan_id,
+                result["summary"]["requests"],
+                result["summary"]["findings"],
+                result["summary"]["failed"],
+            )
+            return result
+        except Exception as exc:
+            app.state.scan_store.fail(scan_id)
+            logger.error(
+                "inventory_scan_failed scan_id=%s error_type=%s",
                 scan_id,
                 type(exc).__name__,
             )

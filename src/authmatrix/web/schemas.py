@@ -39,6 +39,12 @@ class ScanRequest(StrictModel):
     values_mapping: str | None = Field(default=None, min_length=1, max_length=255)
 
 
+class InventoryScanRequest(ScanRequest):
+    """Selects a stored asset; it cannot provide execution or authorization policy."""
+
+    asset_id: str = Field(min_length=1, max_length=64)
+
+
 class BaselineComparisonRequest(StrictModel):
     baseline_scan_id: str = Field(min_length=1, max_length=64)
     current_scan_id: str = Field(min_length=1, max_length=64)

@@ -40,20 +40,55 @@ scanner/application stages plus the asset inventory foundation:
    own delegated subtree. Hierarchical checks compare canonical DNS label
    sequences, so a textual suffix without a label boundary does not match.
 
-The current implementation intentionally permits targets only at literal loopback
-IP addresses (`127.0.0.1` or `::1`) listed in `scope.allowed_hosts`. It does not
-resolve hostnames or accept a network target. The built-in demo API is read-only.
-Destructive HTTP methods are rejected unless explicitly enabled in a local policy;
-they are not used by the included examples or lab.
+The existing CLI scanner and `/api/scans` endpoint continue to permit targets
+only at literal loopback IP addresses listed in `scope.allowed_hosts`; their
+validation behavior is unchanged. The built-in demo API is read-only.
+Destructive HTTP methods remain controlled by the local policy.
 
-Asset inventory authorization is separate from scanner policy authorization.
-Inventory creation does not authorize or launch a scan, and the inventory scope
-evaluator is not currently connected to CLI or API scanner execution. Existing
-scans continue to use their existing loopback-only policy allowlist. Future
-scanners must reuse the central scope evaluator and perform execution-time DNS/IP
-validation, destination pinning, and redirect checks. DNS rebinding defenses and
-hostname-to-IP authorization are not implemented by asset registration or scope
-preview.
+The optional `/api/scans/inventory` path is GUI-only and disabled unless the
+server operator enables `AUTHMATRIX_INVENTORY_EXECUTION_ENABLED`. It loads the
+selected asset from SQLite; client IDs are selectors only, never authorization
+proof. The asset must be active, explicitly confirmed, in its authorization
+period, and pass the shared include/exclude evaluator before DNS resolution.
+The target protocol and port are server-selected (`https:443` by default) and
+must be in the explicit port allowlist. HTTP port 80 requires a separate
+server-side opt-in. The scan uses only policy operations and explicit OpenAPI
+values; it does not crawl or discover paths.
+
+For domain and hostname targets, public global-unicast A/AAAA results may be
+used without separate IP records only when public egress is explicitly enabled.
+Private, loopback, link-local, and configured special-purpose addresses require
+both explicit server-side address-class permission and a separately active,
+authorized, included IP/CIDR record. IP exclusions always veto. Multicast and
+unspecified addresses are non-connectable and always rejected. The complete
+DNS answer set must pass; one unsafe or excluded answer prevents all target
+connections. Resolver time, CNAME depth, and answer count are bounded, and
+truncated UDP responses are retried over TCP only to the same numeric resolver.
+
+The custom HTTPX transport creates a one-request httpcore pool with a pinned
+numeric network backend. It verifies the connected peer before TLS, retains the
+original hostname in the URL for HTTP authority, TLS SNI, and certificate
+verification, and has no default-resolver fallback. Proxy environment variables,
+redirects, retries, connection reuse, and HTTP/2 are disabled. The connection
+pool is closed after each response; only explicitly configured policy/OpenAPI
+paths are requested.
+
+After DNS, a fresh hostname and address-scope check is made while holding a
+bounded SQLite `BEGIN IMMEDIATE` reservation through socket connection, peer
+verification, TLS, request transmission, and response headers. Revocation
+committed during DNS is observed before connecting. A revocation concurrent with
+the final transaction waits; the request authorized at that linearization point
+may be sent before the revocation commits. This does not guarantee instantaneous
+revocation and can block other database writers until response headers or the
+transaction timeout.
+
+The address classifier combines explicit IPv4/IPv6 special-purpose ranges with
+standard-library properties and should be reviewed as registries change. DNS is
+not a source of authorization: it only yields candidate addresses after the
+hostname is authorized. Operators remain responsible for resolver integrity,
+server-side egress policy, approved ports, and the local dashboard trust
+boundary. The inventory path is not a generic vulnerability scanner and does
+not add port scanning, crawling, Nmap, or Nuclei.
 
 The BOLA and BFLA labels identify policy checks, not proof of a complete
 vulnerability assessment. AuthMatrix does not infer a correct authorization
@@ -61,14 +96,15 @@ policy from an API specification. BFLA evidence is a boolean presence check at
 the configured JSON response path; the response value itself is not retained.
 OpenAPI schema constraints beyond parameter JSON types are not validated.
 
-The web API accepts only server-side policy filenames; scan target URLs and
-credentials are never accepted from browser input. Every scan requires an
-explicit authorization acknowledgement. Policy and OpenAPI files are resolved
-inside their configured local directories, and cross-origin state-changing API
-requests are rejected unless their Origin is explicitly trusted. A scan lock
-prevents concurrent scans in one server process. The `authmatrix web` command
-binds only to a literal loopback IP and uses one worker. Do not expose the
-dashboard to public networks.
+The web API accepts server-side policy filenames and, only for inventory
+execution, a stored asset ID as an untrusted selector; target URLs, credentials,
+resolver choices, and pinned addresses are never accepted from browser input.
+Every scan requires an explicit authorization acknowledgement. Policy and
+OpenAPI files are resolved inside their configured local directories, and
+cross-origin state-changing API requests are rejected unless their Origin is
+explicitly trusted. A scan lock prevents concurrent scans in one server process.
+The `authmatrix web` command binds only to a literal loopback IP and uses one
+worker. Do not expose the dashboard to public networks.
 
 OpenAPI value mappings use the policy operation ID as their key, with an
 optional `operation_id` when the OpenAPI operation ID differs. Parameter values
