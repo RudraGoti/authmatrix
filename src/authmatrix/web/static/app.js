@@ -6,6 +6,7 @@ const API = {
   policies: "/api/policies",
   scans: "/api/scans",
   inventoryScans: "/api/scans/inventory",
+  posture: "/api/posture",
   findings: "/api/findings",
   comparisons: "/api/comparisons",
   assets: "/api/assets",
@@ -20,6 +21,7 @@ const PAGE_NAMES = {
   policies: "Policies",
   assets: "Asset Inventory",
   scope: "Authorization Scope",
+  "web-posture": "Web Posture",
   openapi: "OpenAPI",
   findings: "Findings",
   reports: "Reports",
@@ -30,6 +32,7 @@ const PAGE_DESCRIPTIONS = {
   policies: "Review validated policies and their safe configuration metadata.",
   assets: "Register assets and record explicit authorization for future assessments.",
   scope: "Review included assets, exclusions, and current authorization eligibility.",
+  "web-posture": "Run a bounded, metadata-only HTTP security posture assessment against an explicitly authorized inventory asset.",
   openapi: "Browse supported operations from configured local OpenAPI documents.",
   findings: "Review authorization findings from completed scans.",
   reports: "Open JSON/HTML reports and compare completed scans against baselines.",
@@ -83,6 +86,7 @@ const elements = {
 let policiesLoaded = false;
 let openapiOptionsLoaded = false;
 let inventoryExecutionEnabled = false;
+let webPostureEnabled = false;
 let inventoryAssetsLoaded = false;
 let scanRunning = false;
 let activePage = "dashboard";
@@ -99,7 +103,7 @@ function navigate(page) {
   const isDashboard = selectedPage === "dashboard";
   const isNewScan = selectedPage === "new-scan";
   const isWorkspacePage = [
-    "policies", "assets", "scope", "openapi", "findings", "reports", "history",
+    "policies", "assets", "scope", "web-posture", "openapi", "findings", "reports", "history",
   ].includes(selectedPage);
 
   if (!isNewScan) {
@@ -200,6 +204,16 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
+function updateWebPostureNavigation() {
+  const link = document.querySelector('[data-page="web-posture"]');
+  if (link) {
+    link.hidden = !webPostureEnabled;
+  }
+  if (!webPostureEnabled && activePage === "web-posture") {
+    navigate("dashboard");
+  }
+}
+
 async function refreshApiStatus(showChecking = false) {
   if (statusRefreshInFlight) {
     return;
@@ -226,6 +240,8 @@ async function refreshApiStatus(showChecking = false) {
       : [];
     inventoryExecutionEnabled =
       capabilities.includes("inventory_scoped_gui_execution");
+    webPostureEnabled = capabilities.includes("web_posture_assessment");
+    updateWebPostureNavigation();
     const inventoryMode = elements.scanMode.querySelector(
       'option[value="inventory"]',
     );
@@ -252,6 +268,8 @@ async function refreshApiStatus(showChecking = false) {
       }
     }
   } catch (error) {
+    webPostureEnabled = false;
+    updateWebPostureNavigation();
     elements.versionStat.textContent = "—";
     elements.capabilityStat.textContent = "—";
 
@@ -346,7 +364,7 @@ function createWorkspaceCard(titleText, detailsText = "") {
 
 async function loadWorkspace(page = activePage) {
   if (![
-    "policies", "assets", "scope", "openapi", "findings", "reports", "history",
+    "policies", "assets", "scope", "web-posture", "openapi", "findings", "reports", "history",
   ].includes(page)) {
     return;
   }
@@ -368,6 +386,8 @@ async function loadWorkspace(page = activePage) {
       await renderOpenApiWorkspace();
     } else if (page === "findings") {
       await renderFindingsWorkspace();
+    } else if (page === "web-posture") {
+      await renderWebPostureWorkspace();
     } else {
       await renderScanWorkspace(page);
     }
@@ -375,6 +395,238 @@ async function loadWorkspace(page = activePage) {
     elements.workspaceContent.replaceChildren();
     showWorkspaceMessage(error.message, "error");
   }
+}
+
+async function renderWebPostureWorkspace() {
+  if (!webPostureEnabled) {
+    elements.workspaceContent.replaceChildren();
+    showWorkspaceMessage(
+      "Web posture assessment is disabled by server policy.",
+      "error",
+    );
+    return;
+  }
+
+  const assets = [];
+  for (let offset = 0; offset < 5000; offset += 100) {
+    const page = await fetchJson(`${API.assets}?limit=100&offset=${offset}`);
+    const batch = Array.isArray(page.assets) ? page.assets : [];
+    assets.push(...batch);
+    if (batch.length < 100 || assets.length >= page.summary.total) {
+      break;
+    }
+  }
+
+  const eligibleAssets = assets.filter((asset) =>
+    ["domain", "subdomain", "hostname", "ipv4", "ipv6"].includes(asset.asset_type) &&
+    asset.authorization_status === "authorized" &&
+    asset.active === true &&
+    asset.scope_eligible === true
+  );
+
+  const card = createWorkspaceCard(
+    "Assess an authorized asset",
+    "AuthMatrix sends one bounded HEAD request to the approved root origin. It does not crawl pages, follow redirects, or retain response bodies or cookie values.",
+  );
+
+  const form = document.createElement("form");
+  form.className = "inventory-form";
+
+  const field = document.createElement("div");
+  field.className = "inventory-control";
+  const label = document.createElement("label");
+  label.htmlFor = "posture-asset";
+  label.textContent = "Authorized inventory asset";
+
+  const select = document.createElement("select");
+  select.id = "posture-asset";
+  select.name = "asset_id";
+  select.required = true;
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = eligibleAssets.length
+    ? "Select an authorized asset"
+    : "No eligible authorized assets available";
+  select.append(placeholder);
+
+  eligibleAssets.forEach((asset) => {
+    const option = document.createElement("option");
+    option.value = asset.asset_id;
+    option.textContent =
+      `${asset.name} · ${asset.asset_type} · ${asset.canonical_value}`;
+    select.append(option);
+  });
+
+  field.append(label, select);
+  form.append(field);
+
+  const confirmation = document.createElement("input");
+  confirmation.type = "checkbox";
+  confirmation.id = "posture-authorization-confirmed";
+  confirmation.name = "authorization_confirmed";
+
+  const confirmationLabel = document.createElement("label");
+  confirmationLabel.className = "authorization-confirmation";
+  confirmationLabel.htmlFor = confirmation.id;
+  confirmationLabel.append(
+    confirmation,
+    document.createTextNode(
+      " I confirm that I am authorized to assess this asset using the configured server policy.",
+    ),
+  );
+  form.append(confirmationLabel);
+
+  const actions = document.createElement("div");
+  actions.className = "inventory-actions";
+
+  const submit = document.createElement("button");
+  submit.className = "primary-button";
+  submit.type = "submit";
+  submit.textContent = "Run Web Posture Assessment";
+  submit.disabled = eligibleAssets.length === 0;
+
+  actions.append(submit);
+  form.append(actions);
+  card.append(form);
+  elements.workspaceContent.append(card);
+
+  const updateSubmit = () => {
+    submit.disabled = !select.value || !confirmation.checked;
+  };
+  select.addEventListener("change", updateSubmit);
+  confirmation.addEventListener("change", updateSubmit);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!select.value || !confirmation.checked || !webPostureEnabled) {
+      return;
+    }
+
+    submit.disabled = true;
+    submit.textContent = "Assessing...";
+    elements.workspaceMessage.hidden = true;
+
+    const selectedAsset = eligibleAssets.find(
+      (asset) => asset.asset_id === select.value,
+    );
+
+    try {
+      const result = await fetchJson(API.posture, {
+        method: "POST",
+        body: JSON.stringify({
+          asset_id: select.value,
+          authorization_confirmed: true,
+        }),
+      });
+
+      if (activePage !== "web-posture") {
+        return;
+      }
+
+      renderWebPostureResult(result, selectedAsset);
+    } catch (error) {
+      if (activePage === "web-posture") {
+        showWorkspaceMessage(
+          `Web posture assessment could not be completed: ${error.message}`,
+          "error",
+        );
+      }
+    } finally {
+      submit.textContent = "Run Web Posture Assessment";
+      updateSubmit();
+    }
+  });
+}
+
+function renderWebPostureResult(result, selectedAsset) {
+  const statusCode = Number.isInteger(result.status_code)
+    ? `HTTP ${result.status_code}`
+    : "HTTP status unavailable";
+
+  const card = createWorkspaceCard(
+    "Assessment result",
+    `${result.outcome || "unknown"} · ${statusCode}`,
+  );
+
+  const metadata = document.createElement("ul");
+  metadata.className = "workspace-list";
+
+  const fields = [
+    ["Asset", selectedAsset?.name || result.asset_id],
+    ["Target ID", result.asset_id],
+    ["Origin", `${result.scheme} · port ${result.port}`],
+    ["Request", `${result.method} ${result.path}`],
+    ["Assessed at", result.assessed_at],
+  ];
+
+  fields.forEach(([label, value]) => {
+    const item = document.createElement("li");
+    item.textContent = `${label}: ${value ?? "Unavailable"}`;
+    metadata.append(item);
+  });
+  card.append(metadata);
+
+  if (result.reason) {
+    const reason = document.createElement("p");
+    reason.className = "activity-meta";
+    reason.textContent = `Reason: ${result.reason}`;
+    card.append(reason);
+  }
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Security observations";
+  card.append(heading);
+
+  const observations = document.createElement("ul");
+  observations.className = "workspace-list";
+
+  (Array.isArray(result.observations) ? result.observations : [])
+    .forEach((observation) => {
+      const item = document.createElement("li");
+      const check = String(observation.check || "unknown_check")
+        .replaceAll("_", " ");
+      const status = String(observation.status || "unknown");
+      item.textContent = `${check}: ${status}${
+        observation.evidence ? ` · ${observation.evidence}` : ""
+      }`;
+      observations.append(item);
+    });
+
+  if (!observations.childElementCount) {
+    const item = document.createElement("li");
+    item.textContent = "No security observations were returned.";
+    observations.append(item);
+  }
+  card.append(observations);
+
+  const cookieHeading = document.createElement("h3");
+  cookieHeading.textContent = "Cookie security summary";
+  card.append(cookieHeading);
+
+  const cookies = document.createElement("ul");
+  cookies.className = "workspace-list";
+  const cookieSummary = result.cookie_summary &&
+    typeof result.cookie_summary === "object"
+    ? result.cookie_summary
+    : {};
+
+  Object.entries(cookieSummary).forEach(([key, value]) => {
+    const item = document.createElement("li");
+    item.textContent = `${key.replaceAll("_", " ")}: ${
+      Number.isFinite(value) ? value : "Unavailable"
+    }`;
+    cookies.append(item);
+  });
+
+  if (!cookies.childElementCount) {
+    const item = document.createElement("li");
+    item.textContent = "No cookie metadata available.";
+    cookies.append(item);
+  }
+  card.append(cookies);
+
+  elements.workspaceContent.append(card);
 }
 
 async function renderPoliciesWorkspace() {

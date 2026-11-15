@@ -44,6 +44,11 @@ class InventoryScanRequest(ScanRequest):
 
     asset_id: str = Field(min_length=1, max_length=64)
 
+class WebPostureRequest(StrictModel):
+    """Selects one stored asset for a bounded posture assessment."""
+
+    asset_id: str = Field(min_length=1, max_length=64)
+    authorization_confirmed: StrictBool = False
 
 class BaselineComparisonRequest(StrictModel):
     baseline_scan_id: str = Field(min_length=1, max_length=64)

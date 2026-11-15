@@ -147,3 +147,20 @@ Compose host binding remains loopback-only. The optional lab service is
 profile-gated, not published to the host, health-checked, and uses the same
 container restrictions. Docker runtime behavior is not verified in the current
 development environment because Docker CLI and Compose are unavailable.
+
+## Web posture assessment
+
+Web posture assessment is exposed separately through `POST /api/posture`.
+It requires both inventory-scoped execution and the independently
+disabled-by-default web posture policy, plus explicit authorization
+confirmation. The client selects only an existing eligible inventory
+asset; it cannot supply a URL, protocol, port, path, resolver, or transport
+override.
+
+The service makes one bounded `HEAD /` request through the inventory-scoped
+transport, disables redirect following, and does not consume the response
+body. It evaluates an allowlist of response security headers and reports
+cookie attributes only as aggregate counts. Request timeout and
+response-header acceptance limits are server-controlled. Findings are
+informational observations rather than proof of exploitability or overall
+security.
