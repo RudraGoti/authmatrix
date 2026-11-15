@@ -23,3 +23,143 @@ jobs:
         run: python -m pytest
       - name: Run Ruff
         run: ruff check .
+
+  package:
+    name: Build and verify Python distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build frontend
+        run: python -m pip install --disable-pip-version-check build
+
+      - name: Build wheel and source distribution
+        run: python -m build --outdir "$RUNNER_TEMP/authmatrix-dist"
+
+      - name: Verify distribution contents and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - "$RUNNER_TEMP/authmatrix-dist" <<'PY'
+          from email.parser import Parser
+          from pathlib import Path
+          import sys
+          import tarfile
+          import zipfile
+
+          dist = Path(sys.argv[1])
+          wheels = list(dist.glob("*.whl"))
+          sdists = list(dist.glob("*.tar.gz"))
+
+          assert len(wheels) == 1, f"Expected one wheel, found {len(wheels)}"
+          assert len(sdists) == 1, f"Expected one sdist, found {len(sdists)}"
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              names = set(archive.namelist())
+              metadata_paths = [
+                  name for name in names
+                  if name.endswith(".dist-info/METADATA")
+              ]
+              assert len(metadata_paths) == 1
+              metadata = Parser().parsestr(
+                  archive.read(metadata_paths[0]).decode()
+              )
+
+              assert metadata["Name"] == "authmatrix"
+              assert metadata["Version"] == "0.1.0"
+              assert metadata["Requires-Python"] == ">=3.11"
+              assert metadata["License-Expression"] == "MIT"
+
+              for asset in (
+                  "authmatrix/web/static/index.html",
+                  "authmatrix/web/static/styles.css",
+                  "authmatrix/web/static/app.js",
+              ):
+                  assert asset in names, f"Wheel is missing {asset}"
+
+              assert any(
+                  name.endswith("/LICENSE") for name in names
+              ), "Wheel is missing the MIT license"
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              names = set(archive.getnames())
+              for required in (
+                  "LICENSE",
+                  "README.md",
+                  "CHANGELOG.md",
+                  "SECURITY.md",
+                  "MANIFEST.in",
+                  "docs/architecture.md",
+              ):
+                  assert any(
+                      name.endswith("/" + required) for name in names
+                  ), f"Source distribution is missing {required}"
+
+          print("Wheel and source distribution contents verified.")
+          PY
+
+      - name: Install and verify wheel in a clean environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          wheels=("$RUNNER_TEMP/authmatrix-dist"/*.whl)
+          test "${#wheels[@]}" -eq 1
+          wheel="${wheels[0]}"
+
+          python -m venv "$RUNNER_TEMP/authmatrix-wheel-env"
+          env_python="$RUNNER_TEMP/authmatrix-wheel-env/bin/python"
+          env_cli="$RUNNER_TEMP/authmatrix-wheel-env/bin/authmatrix"
+
+          "$env_python" -m pip install --disable-pip-version-check "$wheel"
+          test "$("$env_cli" version)" = "0.1.0"
+          "$env_cli" --help
+
+          "$env_python" - <<'PY'
+          from importlib.resources import files
+          import authmatrix
+
+          static = files("authmatrix.web").joinpath("static")
+          for asset in ("index.html", "styles.css", "app.js"):
+              assert static.joinpath(asset).is_file(), asset
+
+          print("Wheel installation and dashboard assets verified.")
+          print("Installed from:", authmatrix.__file__)
+          PY
+
+      - name: Install and verify source distribution in a clean environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          sdists=("$RUNNER_TEMP/authmatrix-dist"/*.tar.gz)
+          test "${#sdists[@]}" -eq 1
+          sdist="${sdists[0]}"
+
+          python -m venv "$RUNNER_TEMP/authmatrix-sdist-env"
+          env_python="$RUNNER_TEMP/authmatrix-sdist-env/bin/python"
+          env_cli="$RUNNER_TEMP/authmatrix-sdist-env/bin/authmatrix"
+
+          "$env_python" -m pip install --disable-pip-version-check "$sdist"
+          test "$("$env_cli" version)" = "0.1.0"
+          "$env_cli" --help
+
+          "$env_python" - <<'PY'
+          from importlib.resources import files
+          import authmatrix
+
+          static = files("authmatrix.web").joinpath("static")
+          for asset in ("index.html", "styles.css", "app.js"):
+              assert static.joinpath(asset).is_file(), asset
+
+          print("Source distribution installation and dashboard assets verified.")
+          print("Installed from:", authmatrix.__file__)
+          PY

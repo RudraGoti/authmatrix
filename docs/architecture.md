@@ -145,8 +145,14 @@ container filesystem with a persistent data volume. The image listens on all
 interfaces only inside its network namespace so port forwarding works; the
 Compose host binding remains loopback-only. The optional lab service is
 profile-gated, not published to the host, health-checked, and uses the same
-container restrictions. Docker runtime behavior is not verified in the current
-development environment because Docker CLI and Compose are unavailable.
+container restrictions. Docker CLI and Compose are unavailable in the
+current Codespace, so local container execution is not verified there.
+GitHub Actions builds the production image and runs Docker Compose runtime
+smoke tests. The workflow checks service health, application and dashboard
+responses, loopback-only host port publishing, absence of host port publishing
+for the lab, container hardening, internal lab connectivity, and cleanup.
+These automated checks do not constitute a complete production deployment
+assessment.
 
 ## Web posture assessment
 

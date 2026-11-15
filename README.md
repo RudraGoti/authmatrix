@@ -430,14 +430,15 @@ service uses the same read-only filesystem, dropped capabilities, and
 `no-new-privileges` restriction; it is health-checked and stopped with `SIGINT`
 for graceful server cleanup.
 
-Docker runtime verification has **not** been performed in the current
-environment (`docker --version` and `docker compose version` both report that
-the command is unavailable). Static configuration tests cover the image
-command, permissions, volume, loopback publishing, health checks, container
-restrictions, credentials, and optional lab profile; they do not prove that the
-images build or containers run. Use the following sequence on a Docker-capable
-machine to verify build, health, dashboard access, explicit authorization,
-vulnerable/fixed results, reports, and persistent history:
+Docker CLI and Compose are not available in the current Codespace, so
+local container execution cannot be performed here. However, GitHub Actions
+builds the production image and runs Docker Compose runtime smoke tests on
+pull requests and pushes to `main`. These checks verify service health,
+application and dashboard responses, loopback-only host port publishing,
+absence of host port publishing for the lab, container hardening, internal
+lab connectivity, and cleanup. They do not replace a complete manual
+end-to-end assessment of every application workflow. The following sequence
+can also be used on a Docker-capable machine for additional local validation:
 
 The dashboard service does not provide demo credential defaults. Set
 `AUTHMATRIX_ALICE_TOKEN`, `AUTHMATRIX_BOB_TOKEN`, and
