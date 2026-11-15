@@ -125,6 +125,31 @@ class InventoryExecutionPolicy:
         if not 0 < self.authorization_lock_timeout <= 5:
             raise ValueError("Authorization lock timeout must be at most 5 seconds.")
 
+@dataclass(frozen=True)
+class WebPosturePolicy:
+    """Bounded server-side limits for web posture assessment."""
+
+    enabled: bool
+    timeout_seconds: float = 5.0
+    max_header_bytes: int = 16384
+    max_header_count: int = 64
+    max_cookie_headers: int = 32
+
+    def __post_init__(self) -> None:
+        if not 0 < self.timeout_seconds <= 10:
+            raise ValueError(
+                "Web posture timeout must be greater than 0 and at most 10 seconds."
+            )
+
+        for name, value, maximum in (
+            ("max_header_bytes", self.max_header_bytes, 32768),
+            ("max_header_count", self.max_header_count, 128),
+            ("max_cookie_headers", self.max_cookie_headers, 64),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer.")
+            if not 1 <= value <= maximum:
+                raise ValueError(f"{name} is outside its permitted range.")
 
 class AddressPolicyError(ValueError):
     """Raised when a resolved address set exceeds server-side scope policy."""
@@ -306,6 +331,40 @@ def load_inventory_execution_policy(environment=None) -> InventoryExecutionPolic
         authorization_lock_timeout=lock_timeout,
     )
 
+def load_web_posture_policy(environment=None) -> WebPosturePolicy:
+    """Load bounded web posture settings exclusively from server environment."""
+    settings = environ if environment is None else environment
+
+    def boolean(name: str, default: bool = False) -> bool:
+        value = settings.get(name)
+        if value is None:
+            return default
+        normalized = value.strip().lower()
+        if normalized not in {"true", "false"}:
+            raise ValueError(f"{name} must be 'true' or 'false'.")
+        return normalized == "true"
+
+    try:
+        timeout = float(settings.get("AUTHMATRIX_WEB_POSTURE_TIMEOUT_SECONDS", "5"))
+        header_bytes = int(
+            settings.get("AUTHMATRIX_WEB_POSTURE_MAX_HEADER_BYTES", "16384")
+        )
+        header_count = int(
+            settings.get("AUTHMATRIX_WEB_POSTURE_MAX_HEADER_COUNT", "64")
+        )
+        cookie_count = int(
+            settings.get("AUTHMATRIX_WEB_POSTURE_MAX_COOKIE_HEADERS", "32")
+        )
+    except ValueError as exc:
+        raise ValueError("Web posture numeric settings are invalid.") from exc
+
+    return WebPosturePolicy(
+        enabled=boolean("AUTHMATRIX_WEB_POSTURE_ENABLED"),
+        timeout_seconds=timeout,
+        max_header_bytes=header_bytes,
+        max_header_count=header_count,
+        max_cookie_headers=cookie_count,
+    )
 
 class DnspythonResolver:
     """Resolve A/AAAA with bounded CNAME traversal and complete-answer checks."""

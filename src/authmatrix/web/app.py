@@ -17,7 +17,10 @@ from starlette.concurrency import run_in_threadpool
 from authmatrix import __version__
 from authmatrix.comparison import compare_result_documents
 from authmatrix.config import load_config
-from authmatrix.execution_scope import load_inventory_execution_policy
+from authmatrix.execution_scope import (
+    load_inventory_execution_policy,
+    load_web_posture_policy,
+)
 from authmatrix.reporting import render_html, sanitize_results
 from authmatrix.web.asset_inventory import (
     AssetValidationError,
@@ -32,6 +35,7 @@ from authmatrix.web.errors import (
     AssetAPIError,
     register_error_handlers,
 )
+from authmatrix.web.posture import run_web_posture_assessment
 from authmatrix.web.schemas import (
     AssetActiveUpdate,
     AssetCreate,
@@ -46,6 +50,7 @@ from authmatrix.web.schemas import (
     ScopeEntryCreate,
     ScopeTarget,
     StatusResponse,
+    WebPostureRequest,
 )
 from authmatrix.web.services import (
     configured_openapi_max_bytes,
@@ -211,6 +216,7 @@ def create_app(
     app.state.active_scan_id = None
     app.state.trusted_origins = _configured_trusted_origins()
     app.state.inventory_execution_policy = load_inventory_execution_policy()
+    app.state.web_posture_policy = load_web_posture_policy()
 
     @app.middleware("http")
     async def enforce_web_security(request: Request, call_next):
@@ -284,6 +290,11 @@ def create_app(
         ]
         if app.state.inventory_execution_policy.enabled:
             capabilities.append("inventory_scoped_gui_execution")
+        if (
+            app.state.inventory_execution_policy.enabled
+            and app.state.web_posture_policy.enabled
+        ):
+            capabilities.append("web_posture_assessment")
         return StatusResponse(
             version=__version__,
             capabilities=capabilities,
@@ -824,6 +835,72 @@ def create_app(
             raise
         finally:
             app.state.active_scan_id = None
+            app.state.scan_lock.release()
+
+    @app.post(
+        "/api/posture",
+        response_model=None,
+        responses={
+            403: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+        },
+        tags=["posture"],
+    )
+    async def create_web_posture_assessment(
+        payload: WebPostureRequest,
+    ) -> dict | JSONResponse:
+        if not app.state.inventory_execution_policy.enabled:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "inventory_execution_disabled",
+                    "detail": (
+                        "Inventory-scoped execution is disabled by server policy."
+                    ),
+                },
+            )
+
+        if not app.state.web_posture_policy.enabled:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "web_posture_disabled",
+                    "detail": (
+                        "Web posture assessment is disabled by server policy."
+                    ),
+                },
+            )
+
+        if payload.authorization_confirmed is not True:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "authorization_required",
+                    "detail": (
+                        "Confirm authorization before starting an assessment."
+                    ),
+                },
+            )
+
+        if not app.state.scan_lock.acquire(blocking=False):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "scan_in_progress",
+                    "detail": MAX_ACTIVE_SCAN_DETAIL,
+                },
+            )
+
+        try:
+            return await run_in_threadpool(
+                run_web_posture_assessment,
+                app.state.scan_store,
+                payload.asset_id,
+                app.state.inventory_execution_policy,
+                app.state.web_posture_policy,
+                authorization_confirmed=payload.authorization_confirmed,
+            )
+        finally:
             app.state.scan_lock.release()
 
     @app.get("/api/scans/{scan_id}", response_model=None, tags=["scans"])

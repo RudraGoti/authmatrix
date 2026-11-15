@@ -755,3 +755,34 @@ Do not remove the loopback scope restriction to test a third-party system.
 ---
 
 **Built for learning, testing, and improving API authorization security.**
+
+#### Web posture assessment
+
+Web posture assessment is a separate, opt-in capability for eligible,
+explicitly authorized inventory assets. It requires both
+`AUTHMATRIX_INVENTORY_EXECUTION_ENABLED=true` and
+`AUTHMATRIX_WEB_POSTURE_ENABLED=true`.
+
+| Setting | Default | Allowed range |
+|---|---:|---|
+| `AUTHMATRIX_WEB_POSTURE_ENABLED` | `false` | `true` or `false` |
+| `AUTHMATRIX_WEB_POSTURE_TIMEOUT_SECONDS` | `5` | Greater than 0, at most 10 seconds |
+| `AUTHMATRIX_WEB_POSTURE_MAX_HEADER_BYTES` | `16384` | 1–32768 |
+| `AUTHMATRIX_WEB_POSTURE_MAX_HEADER_COUNT` | `64` | 1–128 |
+| `AUTHMATRIX_WEB_POSTURE_MAX_COOKIE_HEADERS` | `32` | 1–64 |
+
+Enable it on the server after configuring inventory-scoped execution with
+`AUTHMATRIX_WEB_POSTURE_ENABLED=true`, then start the dashboard using
+`authmatrix web`.
+
+The dashboard selects an existing eligible inventory asset and requires
+explicit authorization confirmation. The server controls the protocol,
+port, request timeout, and response-header limits. Each assessment makes
+one bounded `HEAD /` request, does not follow redirects, does not crawl,
+and does not consume the response body.
+
+Checks cover HSTS, Content-Security-Policy, MIME-sniffing protection,
+clickjacking protections, Referrer-Policy, Permissions-Policy, and cookie
+security attributes. Cookie names and values are not retained; only
+aggregate attribute counts are reported. Results are informational
+observations, not proof that an asset is secure or vulnerable.
