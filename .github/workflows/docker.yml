@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   docker-build:
-    name: Docker image build
+    name: Docker build and Compose runtime
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -21,4 +21,93 @@ jobs:
         run: docker compose config --quiet
 
       - name: Build production image
-        run: docker build --tag authmatrix:ci .
+        run: docker build --tag authmatrix:local .
+
+      - name: Start application and lab services
+        run: docker compose --profile lab up --no-build --wait --detach
+
+      - name: Verify service health and application responses
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_ID="$(docker compose ps --quiet authmatrix)"
+          LAB_ID="$(docker compose ps --quiet lab)"
+
+          test -n "$APP_ID"
+          test -n "$LAB_ID"
+
+          APP_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' "$APP_ID")"
+          LAB_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' "$LAB_ID")"
+
+          printf 'Application health: %s\n' "$APP_HEALTH"
+          printf 'Lab health: %s\n' "$LAB_HEALTH"
+
+          test "$APP_HEALTH" = "healthy"
+          test "$LAB_HEALTH" = "healthy"
+
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8001/api/health \
+            | python -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok"; assert isinstance(data["version"], str) and data["version"]'
+
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8001/ \
+            --output /tmp/authmatrix-dashboard.html
+
+          grep -qi 'AuthMatrix' /tmp/authmatrix-dashboard.html
+
+      - name: Verify host port exposure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_ID="$(docker compose ps --quiet authmatrix)"
+          LAB_ID="$(docker compose ps --quiet lab)"
+
+          echo "Application host port bindings:"
+          docker inspect "$APP_ID" --format '{{json .HostConfig.PortBindings}}'
+
+          docker inspect "$APP_ID" \
+            --format '{{json .HostConfig.PortBindings}}' \
+            | jq -e '
+                .["8001/tcp"] as $bindings
+                | ($bindings | length) == 1
+                  and $bindings[0].HostIp == "127.0.0.1"
+                  and $bindings[0].HostPort == "8001"
+              '
+
+          echo "Lab host port bindings:"
+          docker inspect "$LAB_ID" --format '{{json .HostConfig.PortBindings}}'
+
+          docker inspect "$LAB_ID" \
+            --format '{{json .HostConfig.PortBindings}}' \
+            | jq -e '. == null or . == {}'
+
+      - name: Verify runtime hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for SERVICE in authmatrix lab; do
+            CONTAINER_ID="$(docker compose ps --quiet "$SERVICE")"
+            test -n "$CONTAINER_ID"
+
+            docker inspect "$CONTAINER_ID" --format '{{json .HostConfig}}' \
+              | jq -e '
+                  .ReadonlyRootfs == true
+                  and (.CapDrop | index("ALL") != null)
+                  and (.SecurityOpt | any(. == "no-new-privileges:true"))
+                '
+
+            docker compose exec --no-TTY "$SERVICE" sh -c \
+              'test "$(id -u)" = "10001"'
+          done
+
+      - name: Verify internal lab connectivity
+        run: |
+          docker compose exec --no-TTY authmatrix python -c \
+            "import socket; connection = socket.create_connection(('127.0.0.1', 8000), timeout=3); connection.close()"
+
+      - name: Stop Compose services and remove test resources
+        if: always()
+        run: docker compose --profile lab down --volumes --remove-orphans
